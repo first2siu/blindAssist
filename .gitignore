@@ -1,0 +1,59 @@
+# ---- OS / IDE ----
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*.iml
+.idea/
+.vscode/
+
+# ---- Gradle / Android ----
+.gradle/
+build/
+*/build/
+local.properties
+.cxx/
+
+# Android Studio
+captures/
+.externalNativeBuild/
+.gradle/
+
+# Log / temp
+*.log
+*.tmp
+*.temp
+
+# ---- Java / Maven ----
+server/target/
+server/.mvn/
+server/mvnw
+server/mvnw.cmd
+
+# ---- Keystores / Signing ----
+*.jks
+*.keystore
+*.pem
+*.p12
+*.key
+
+# ---- Misc ----
+*.class
+*.orig
+*.bak
+
+*.iml
+.gradle
+/local.properties
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
