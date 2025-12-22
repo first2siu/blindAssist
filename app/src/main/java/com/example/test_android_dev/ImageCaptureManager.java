@@ -30,4 +30,3 @@ public class ImageCaptureManager {
         // TODO: 拍摄高分辨率照片
         return new byte[0];
     }
-}

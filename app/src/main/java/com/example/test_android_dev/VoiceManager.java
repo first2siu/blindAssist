@@ -51,4 +51,3 @@ public class VoiceManager {
         // 模拟识别结果
         // callback.onResult("去天安门");
     }
-}

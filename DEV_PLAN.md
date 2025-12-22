@@ -32,40 +32,44 @@
 
 ### 二、Android 客户端需要补充的逻辑
 
-当前 Android 客户端位于 `app` 模块，核心类包括（括号中为当前完成度）：
-- `MainActivity`：负责权限申请与初始化（**已实现基础版本**）。
-- `VoiceManager`：语音输出 TTS 已基于 `TextToSpeech` 实现，ASR 仍为占位（**TTS 已完成，ASR 待接入**）。
-- `ImageCaptureManager`：摄像头采集接口（**方法已定义，内部仍为 TODO**）。
-- `NetworkClient`：基于 OkHttp 的 HTTP / WebSocket 通信（**主体已实现，但 BASE_URL 为占位且未解析真实响应内容**）。
-- `FeatureRouter`：根据功能类型调度各业务流程（**各模式主流程已实现，为示例/假数据版**）。
-- `FeatureWheelView`：自定义功能轮盘 View，支持滑动选择与双击确认（**已实现**）。
+当前 Android 客户端位于 `app` 模块，核心类包括：
+- `MainActivity`：负责权限申请与初始化。
+- `VoiceManager`：语音输入/输出接口（待实现）。
+- `ImageCaptureManager`：摄像头采集接口（待实现）。
+- `NetworkClient`：与后端 HTTP / WebSocket 通信（待实现）。
+- `FeatureRouter`：根据功能类型调度各业务流程。
 
 #### 2.1 语音模块 `VoiceManager`
 
-**现状**：
-- 已在 `VoiceManager` 中使用 `TextToSpeech` 完成中文 TTS（`speak` / `speakImmediate` 可用）。
-- `startListening` 仍为 TODO，当前只预留了回调接口 `VoiceCallback`。
+**现状**：只定义了 `init` / `startListening` / `stopListening` / `speakText` 方法，未实现具体逻辑。
 
 **后续需要补充：**
 
-- **ASR（语音转文本）接入**
-  - 方案 A：使用 Android 原生 `SpeechRecognizer`，本地在线识别。
-  - 方案 B：使用第三方 SDK（如讯飞/百度/阿里等）。
-  - 方案 C：录音后上传到后端，由后端调用大模型或云 ASR。
-  - 实现建议（以 A / B 为例）：
-    - 在 `startListening(VoiceCallback callback)` 中：
-      - 初始化并启动 ASR 会话；
-      - 在识别结束或部分结果可用时，将文本通过 `callback.onResult(text)` 返回；
-      - 对错误情况进行区分（网络问题/说话时间过短等），以便上层用 TTS 做不同提示。
-    - 在类中增加必要的释放逻辑（如 `release()`），在应用退出时销毁 ASR/TTS 资源。
+- **ASR（语音转文本）**
+  - 方案 A：使用第三方 SDK（讯飞、Google Speech 等）。
+  - 方案 B：本地录音后通过 `NetworkClient` 上传到服务端，由服务端调用大模型或云 ASR。
+  - 实现建议：
+    - 在 `startListening(VoiceResultCallback callback)` 中：
+      - 开启录音（`AudioRecord` 或 SDK 提供的接口）。
+      - 本地识别：监听识别回调，将结果通过 `callback.onResult(text)` 返回。
+      - 云端识别：将音频缓冲编码（如 PCM/OPUS），调用后端识别接口，拿到文本后调用 `callback.onResult(text)`。
+    - 在 `stopListening()` 中停止录音并释放资源。
+
+- **TTS（文本转语音）**
+  - 可直接使用 Android 自带 `TextToSpeech`。
+  - 在 `init(Context)` 中初始化 TTS 引擎并设置中文语言。
+  - 在 `speakText(String text)` 中：
+    - 调用 `textToSpeech.speak(text, ...)`。
+    - 对多条文本进行简单队列管理，避免抢读。
 
 **开发顺序建议：**
-1. 保持现有 TTS 实现不变，优先在 `startListening` 中接入一个可用的 ASR（可以先用最简单实现）。
-2. 等整体流程稳定后，再根据实际 ASR 行为微调 `FeatureRouter` 中各模式的语音提示与超时处理。
+1. 先实现 TTS（本地 `TextToSpeech`），以便在所有模式中播放语音提示。
+2. 再实现最简 ASR（哪怕是本地录音后模拟返回固定文本），让主流程可以跑通。
+3. 最后替换为真实 ASR 实现。
 
 #### 2.2 图像采集模块 `ImageCaptureManager`
 
-**现状**：`captureCurrentFrame` / `captureHighResFrame` 等方法已定义但返回空数组，还未真正集成 CameraX/Camera2。
+**现状**：`captureSingleFrame` / `startVideoStream` / `stopVideoStream` 是空实现。
 
 **后续需要补充：**
 
@@ -95,75 +99,84 @@
 
 #### 2.3 网络模块 `NetworkClient`
 
-**现状**：已使用 OkHttp 实现了大部分 HTTP/WebSocket 封装逻辑：
-- `sendVoiceCommand` → POST `/api/voice/command`
-- `requestNavigation` → POST `/api/navigation/route`
-- `askQuestion` → POST `/api/qa/ask`
-- `uploadVisionRequest` → POST `/api/vision/ocr|scene`
-- `openObstacleWebSocket` / `sendFrameViaWS` → WebSocket `/ws/obstacle`
+**现状**：已定义接口方法，内部尚未实现。
 
-**仍需补充和完善：**
+**后续需要补充：**
 
-- **配置化 BASE_URL / WS_URL**
-  - 当前常量 `BASE_URL = "http://your-backend-api.com"` 和 `WS_URL` 为占位。
-  - 建议：
-    - 抽取到单独的配置类或 `BuildConfig` 字段，方便按环境（本机/测试/生产）切换；
-    - 在文档中说明如何配置为局域网 IP。
+- **HTTP 请求实现**
+  - 推荐引入 `Retrofit` + `OkHttp` + `Gson`，在 `init(Context)` 中初始化。
+  - 实现以下方法：
+    - `sendVoiceText(String text, NetworkCallback<String> callback)`：
+      - POST `/api/voice/command`，Body: `{ "text": text }`。
+      - 将响应 JSON 中的 `feature` / `detail` 或原始 JSON 返回给上层。
+    - `requestNavigation(NavigationRequest request, NetworkCallback<NavigationResult> callback)`：
+      - POST `/api/navigation/route`，Body 对应 `NavigationRequest`。
+      - 将 `voiceSteps` 解析为 `NavigationResult`。
+    - `askQuestion(String question, NetworkCallback<String> callback)`：
+      - POST `/api/qa/ask`，Body: `{ "question": question, "sessionId": 当前会话ID }`。
+    - `uploadImageFrame(byte[] imageData, String sceneType, NetworkCallback<String> callback)`：
+      - 若 `sceneType == "obstacle_avoidance"`：可选择直接走 WebSocket，不通过此接口。
+      - 若 `sceneType == "ocr"`：POST `/api/vision/ocr`，Content-Type: `application/octet-stream`。
+      - 若 `sceneType == "scene_description"`：POST `/api/vision/scene`。
+  - 对错误和超时调用 `callback.onError(e)`，由上层统一用 TTS 进行友好提示。
 
-- **响应解析与错误处理**
-  - 现在的实现直接把 OkHttp `Callback` 暴露给上层，`FeatureRouter` 中仍用固定文案（例如“这是为您找到的答案。”）。
-  - 建议：
-    - 引入 `Gson` 或 `Moshi`，在 `NetworkClient` 内解析 JSON，提供更高层次的结果对象（如 `VoiceCommandResult`、`QaResult` 等）；
-    - 统一处理 HTTP 错误（非 200）和网络异常，并转换为易懂的错误类型，供上层用 TTS 提示（如“服务器繁忙，请稍后再试”）。
-
-- **WebSocket 连接状态管理**
-  - 增加 `closeObstacleWebSocket()`，并在应用退出或模式切换时调用，避免泄漏连接；
-  - 为避障 WebSocket 增加重连/心跳逻辑（可视需要实现）。
+- **WebSocket 避障接口**
+  - 在 `NetworkClient` 中增加：
+    - `connectObstacleWebSocket(Listener listener)`：建立到 `/ws/obstacle` 的连接。
+    - `sendObstacleFrame(byte[] frame)`：发送二进制帧。
+    - `closeObstacleWebSocket()`：关闭连接。
+  - `Listener` 提供：
+    - `onConnected()`、`onInstruction(String json)`、`onError(Throwable)` 等回调。
+  - 使用 OkHttp 的 `WebSocket` 实现。
 
 #### 2.4 功能路由 `FeatureRouter`
 
-**现状**：
-- 已经实现了一个 `route(FeatureType feature)` 方法，根据枚举调用：
-  - `startNavigationFlow` / `startObstacleAvoidance` / `startQAFlow` / `startOCRFlow` / `startSceneDescriptionFlow`。
-- 各方法中已经调用 `VoiceManager` 和 `NetworkClient`，形成了完整的业务链路，但目前多为“示例/假数据”：
-  - 导航固定请求 0 坐标，直接播报“第一步：向前直行”；
-  - 避障对 WebSocket 返回只做固定提示；
-  - QA 固定回答“这是为您找到的答案。”；
-  - OCR/场景描述直接读出示例文本，而非解析真实响应。
+**现状**：有枚举和基本分类逻辑，`triggerFeature` 中各 case 尚未填充。
 
-**后续需要补充与增强：**
+**后续需要补充：**
 
-- **从真实响应中解析内容**
-  - 在 `onResponse` 中通过 `response.body().string()` 获取 JSON，并用 `Gson`/`Moshi` 解析：
-    - 导航：解析 `voiceSteps` 数组，按顺序逐条播报，而不是写死一句话；
-    - 问答：解析 `answer` 字段，而非固定字符串；
-    - OCR：解析 `text` 字段；
-    - 场景描述：解析 `description` 字段；
-    - 避障 WebSocket：解析 JSON 中的 `message` 或结构化字段，决定播报内容。
+- **语音入口与意图识别主流程**
+  - 新增方法如 `startVoiceEntry()`：
+    - 用 TTS 提示“请说出您需要的帮助，比如导航、避障、读文字或问问题。”
+    - 调用 `VoiceManager.startListening` 获取文本。
+    - 优先调用 `NetworkClient.sendVoiceText` 让后端分类；
+    - 如网络不可用或失败，退回到 `classifyFeatureLocally`。
+    - 获取 feature 后调用 `triggerFeature(feature)`。
 
-- **与 ASR 的结合与容错**
-  - 当前 `startNavigationFlow` / `startQAFlow` 等中调用 `startListening` 后，假设一定拿到文本；
-  - 在接入真实 ASR 后，需要针对“识别失败/空文本/用户长时间不说话”等场景增加重试和提示逻辑。
-
-- **模式切换与资源回收**
-  - 进入新模式时，考虑是否需要关闭上一个模式的定时任务/避障流等（例如退出导航时关闭 `obstacleExecutor` 和 WebSocket）。
+- **各功能模式的业务流程实现**
+  - `NAVIGATION`：
+    - 若后端返回的 detail 中已经包含目的地信息，则直接请求路线；
+    - 否则先问一次“请告诉我要去哪里”，再次识别后再调用导航接口；
+    - 拿到 `voiceSteps` 后，用 TTS 逐条播报，并在播报过程中启动避障。
+  - `OBSTACLE_AVOIDANCE`：
+    - 调用 `ImageCaptureManager.startVideoStream` 和 `NetworkClient.connectObstacleWebSocket`；
+    - 将服务端返回的 JSON 指令通过 `VoiceManager.speakText` 即时播报。
+  - `QA_VOICE`：
+    - 进入循环会话：录音 → `/api/qa/ask` → 播报回答；
+    - 将 `sessionId` 在客户端保存下来，多轮带上。
+  - `OCR`：
+    - 提示用户对准需要读取的文字；
+    - 调用 `captureSingleFrame` → `/api/vision/ocr` → 播报文字。
+  - `SCENE_DESCRIPTION`：
+    - 提示用户对准前方场景；
+    - 调用 `captureSingleFrame` → `/api/vision/scene` → 播报描述。
 
 #### 2.5 功能轮盘 UI
 
-**现状**：
-- 已添加 `FeatureWheelView` 自定义 View：
-  - 单指上下滑动切换功能（维护 `FeatureType` 数组与当前索引）；
-  - 双击确认当前功能，通过监听器回调。
-- 可通过设置 `OnFeatureSelectedListener` 在每次滑动时调用 `VoiceManager.speak` 播报功能名，并在确认时调用 `FeatureRouter.route(feature)`。
+**现状**：`activity_main.xml` 中仅有 `FrameLayout` 容器。
 
-**后续可以优化的点：**
+**后续需要补充：**
 
-- 在 `MainActivity` 中完成：
-  - 将 `FeatureWheelView` 添加到 `feature_wheel_container`；
-  - 设置 `OnFeatureSelectedListener`，在 `onItemSelected` 时播报当前功能名称，在 `onItemConfirmed` 时调用 `FeatureRouter.route`。
-- 加强无障碍支持：
-  - 为 View 设置 `contentDescription` 和合适的焦点策略，使 TalkBack 用户也能通过手势访问；
-  - 根据用户偏好调整滑动灵敏度（`distanceY` 阈值）和双击识别时间窗口。
+- 创建一个自定义 View 或 Fragment（例如 `FeatureWheelView`）：
+  - 放置在 `feature_wheel_container` 中。
+  - 内部维护一个功能列表：导航 / 避障 / 问答 / OCR / 场景描述。
+  - 通过单指上下/左右滑动改变当前选中索引。
+  - 每次选中变化时通过 `VoiceManager.speakText("导航")` 等播报。
+  - 通过双击或长按当前区域确认选择，调用 `FeatureRouter.triggerFeature`。
+
+- 无障碍支持：
+  - 为 View 设置合适的 `contentDescription`。
+  - 保持操作逻辑简单，不依赖复杂多指手势。
 
 ---
 
@@ -302,20 +315,18 @@
 ### 六、推荐的近期开发步骤（Checklist）
 
 1. Android 端：
-   - [x] 在 `VoiceManager` 中实现 TTS（`TextToSpeech`）。
-   - [ ] 在 `VoiceManager` 中接入实际 ASR，让各模式“听得懂”用户语音。
-   - [x] 在 `NetworkClient` 中实现基础 HTTP/WebSocket 调用逻辑。
-   - [x] 在 `FeatureRouter` 中实现导航/避障/问答/OCR/场景描述的主流程骨架。
-   - [ ] 在 `FeatureRouter` 中解析真实后端响应内容，替换掉目前的示例/固定文案。
-   - [ ] 在 `MainActivity` 中完成 `FeatureWheelView` 与 `FeatureRouter`/`VoiceManager` 的联动（滑动播报 + 双击确认）。
+   - [ ] 在 `VoiceManager` 中实现 TTS（`TextToSpeech`）。
+   - [ ] 使用占位或简单方案实现 ASR，让问答闭环可以跑通。
+   - [ ] 在 `NetworkClient` 中实现 `/api/qa/ask` 的调用逻辑。
+   - [ ] 在 `FeatureRouter` 中实现 `QA_VOICE` 流程。
 2. Android 视觉 & 网络：
    - [ ] 在 `ImageCaptureManager` 中使用 CameraX 实现 `captureSingleFrame`。
    - [ ] 在 `NetworkClient` 中实现 `/api/vision/ocr` 和 `/api/vision/scene`。
-   - [ ] 在 `FeatureRouter` 中对 OCR 和场景描述使用真实响应文本进行播报。
+   - [ ] 在 `FeatureRouter` 中实现 OCR 和场景描述逻辑。
 3. 导航与避障：
-   - [x] 在 `NetworkClient` 中实现 `/api/navigation/route` 调用和避障 WebSocket 客户端骨架。
-   - [ ] 在 `FeatureRouter` 中解析导航结果（`voiceSteps`）并逐步播报，而非固定文案。
-   - [ ] 在 `ImageCaptureManager` 中实现 `startVideoStream` / `stopVideoStream` 并与 WebSocket 发送逻辑打通。
+   - [ ] 在 `NetworkClient` 中实现 `/api/navigation/route` 调用。
+   - [ ] 在 `NetworkClient` 中实现 WebSocket 客户端，连接 `/ws/obstacle`。
+   - [ ] 在 `ImageCaptureManager` 中实现 `startVideoStream` / `stopVideoStream` 并接到 WebSocket。
 4. 服务端：
    - [ ] 为意图分类、问答、导航、视觉接入实际大模型/MCP 或第三方服务。
    - [ ] 完善避障 WebSocket 中的图像推理逻辑。
