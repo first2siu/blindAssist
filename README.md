@@ -348,10 +348,94 @@
     *   **实现语音识别**: 对接了 Android 原生的语音识别服务，应用现在可以“听懂”用户的语音指令。
     *   **打通问答流程**: 实现了完整的“语音提问 -> 网络请求 -> 解析答案 -> 语音播报”的闭环流程。
 
-### 12-24修改 (最新)
+### 12-24修改
 
 **机型兼容性优化:**
 
 1.  **TTS 多引擎适配**: 针对无谷歌服务框架（Google Play Services）的国产手机（华为、小米等）进行了专项适配。`VoiceManager` 现在会自动检测并优先调用系统内置的 TTS 引擎（如华为移动服务、小米内置语音等），确保在所有 Android 手机上均能发出声音。
 2.  **语言支持增强**: 增加了语言可用性检查逻辑，若当前引擎不支持中文，将自动回退至英文播报或在日志中详细记录错误，避免初始化失败导致的完全无声。
 3.  **构建验证**: 已验证可通过 Gradle 成功构建 APK，并支持全机型安装。
+
+### 12-29修改
+
+feat: 集成 AutoGLM 智能体与无障碍服务以实现 UI 自动化
+
+本次提交引入了 AI 智能体 (AutoGLM) 控制设备 UI 的核心框架。它添加了一个用于执行动作的无障碍服务、一个用于连接后端的 WebSocket 通信层，以及一个用于启动任务的测试 UI。
+
+#### 核心架构：
+
+- **Android 客户端**:
+    - **`AutoGLMService`**: 一个 `AccessibilityService`（无障碍服务），用于根据智能体的指令执行底层 UI 操作，如点击 (`Tap`)、滑动 (`Swipe`)、输入 (`Type`)、启动应用 (`Launch App`) 等。它包含了手势创建和应用发现的逻辑。
+    - **`AgentManager`**: 管理与 Spring Boot 服务器的 WebSocket 连接，编排控制循环（截屏 -> 发送到服务器 -> 接收动作 -> 执行动作），并处理坐标转换。
+    - **`AccessibilityScreenshotManager`**: 一个新的工具类，利用无障碍服务静默截屏（适用于 Android 11+）。
+    - **`AppRegistry`**: 一个静态映射表，用于快速将常用应用名称解析为包名，提高“启动”动作的可靠性。
+- **Spring Boot 服务端 (`server/`)**:
+    - 充当 Android 应用与 Python AI 模型之间的**桥梁**。
+    - **`AgentWebSocketHandler`**: 通过 WebSocket 接收来自 Android 应用的截图和任务数据。
+    - **`AgentService`**: 通过为每个应用会话建立单独的 WebSocket 连接，将数据转发给 Python 模型服务。
+    - **`PythonAgentClient`**: 用于与 Python 后端通信的 WebSocket 客户端。
+
+#### 主要变更：
+
+- **Android 应用 (`app/`)**:
+    - **无障碍**: 添加了 `AutoGLMService` 及其配置 (`accessibility_service_config.xml`) 以启用 UI 控制。
+    - **权限**: 添加了 `QUERY_ALL_PACKAGES` 权限，以允许搜索已安装的应用。
+    - **UI**: 在 `MainActivity` 中用新的测试界面替换了之前的 `FeatureWheelView`，用于输入文本指令和启动/停止智能体。
+    - **通信**: 实现了 `AgentManager` 以处理 WebSocket 生命周期以及与服务器的消息协议。
+    - **依赖**: 添加了 `gson` 用于 JSON 处理。
+- **Java 服务端 (`server/`)**:
+    - **WebSocket**: 配置了 WebSocket 端点 (`/ws/agent`) 以与 Android 客户端通信。增加了消息缓冲区大小以处理大型截图数据。
+    - **智能体逻辑**: 实现了 `AgentService` 以管理智能体任务的生命周期，充当 Python 后端的代理。
+    - **依赖**: 添加了 `Java-WebSocket` 用于连接 Python 客户端，以及 `lombok` 用于减少样板代码。
+    - **配置**: 在 `application.properties` 中将服务器端口设置为 `8090`。
+#### ⭐网络与端口配置指南 (Network Configuration)
+
+本项目包含三层架构：Android 客户端、Spring Boot 中转服务、Python AutoGLM 模型服务。由于开发环境存在网络隔离（如校园网 AP 隔离），请严格按照以下步骤配置 IP 和端口。
+
+#### 1. 服务端配置 (Spring Boot → Python Model)
+Spring Boot 服务需要连接远程或局域网内的 AutoGLM 模型服务。
+
+* **配置文件路径**: `server/src/main/java/com/blindassist/server/service/AgentService.java`
+* **修改参数**: `PYTHON_SERVER_BASE_URI`
+* **配置操作**:
+  将 IP 地址修改为 AutoGLM 模型实际运行的服务器 IP（保持端口 `8080` 不变）。
+    ```java
+    // 修改前 (示例)
+    private static final String PYTHON_SERVER_BASE_URI = "ws://localhost:8080/ws/agent/";
+
+    // 修改后 (当前环境)
+    private static final String PYTHON_SERVER_BASE_URI = "ws://10.25.144.51:8080/ws/agent/";
+    ```
+
+---
+
+#### 2. 客户端配置 (Android App → Spring Boot)
+Android 应用需要连接本地运行的 Spring Boot 服务。根据网络环境不同，分为两种配置方案。
+
+* **配置文件路径**: `app/src/main/java/com/example/test_android_dev/manager/AgentManager.java`
+* **修改参数**: `SERVER_URL`
+
+**方案 A：有线 USB 调试模式（当前环境 / AP 隔离）**
+*适用场景：校园网或公司内网开启了 AP 隔离，手机与电脑虽在同一 Wi-Fi 但无法互相 Ping 通。*
+
+1.  **修改代码**：
+    将地址设置为 `localhost`。在 USB 连接模式下，手机将通过反向代理访问电脑的端口。
+    ```java
+    private static final String SERVER_URL = "ws://localhost:8090/ws/agent";
+    ```
+2.  **建立端口映射**（⚠️ **每次连接 USB 必须执行**）：
+    在电脑终端运行以下 ADB 命令，将手机的 8090 端口请求转发到电脑的 8090 端口：
+    ```bash
+    adb reverse tcp:8090 tcp:8090
+    ```
+
+**方案 B：标准局域网模式**
+*适用场景：手机与电脑连接同一 Wi-Fi，且网络互通。*
+
+1.  **修改代码**：
+    将 `localhost` 替换为运行 Spring Boot 的电脑的局域网 IPv4 地址。
+    ```java
+    // 示例：假设电脑 IP 为 192.168.1.100
+    private static final String SERVER_URL = "ws://192.168.1.100:8090/ws/agent";
+    ```
+2.  **注意事项**：确保电脑防火墙已允许 8090 端口的入站连接。
