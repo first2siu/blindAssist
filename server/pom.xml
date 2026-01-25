@@ -49,6 +49,12 @@
             <version>1.5.3</version>
         </dependency>
 
+        <!-- Redis for TTS priority queue -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+
         <!-- Added for automatic getter/setter generation -->
         <dependency>
             <groupId>org.projectlombok</groupId>
@@ -63,7 +69,10 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
-                <version>${spring.boot.version}</version> <!-- Fix for version warning -->
+                <version>${spring.boot.version}</version>
+                <configuration>
+                    <jvmArguments>-Dfile.encoding=UTF-8</jvmArguments>
+                </configuration>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>

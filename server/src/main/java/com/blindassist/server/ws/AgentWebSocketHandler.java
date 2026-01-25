@@ -26,15 +26,24 @@ public class AgentWebSocketHandler extends TextWebSocketHandler {
 
     @Override
     protected void handleTextMessage(WebSocketSession session, TextMessage message) throws Exception {
-        // 1. 解析 App 发来的 JSON
-        AgentMessage msg = objectMapper.readValue(message.getPayload(), AgentMessage.class);
-        String sessionId = session.getId();
+        String payload = message.getPayload();
+        System.out.println("收到 WebSocket 消息: " + payload);
 
-        // 2. 根据类型调度给 Service
-        if ("init".equals(msg.getType())) {
-            agentService.startTask(sessionId, session, msg.getTask(), msg.getScreenshot(), msg.getScreenInfo());
-        } else if ("step".equals(msg.getType())) {
-            agentService.processStep(sessionId, msg.getScreenshot(), msg.getScreenInfo());
+        try {
+            // 1. 解析 App 发来的 JSON
+            AgentMessage msg = objectMapper.readValue(payload, AgentMessage.class);
+            String sessionId = session.getId();
+            System.out.println("消息类型: " + msg.getType() + ", Session: " + sessionId);
+
+            // 2. 根据类型调度给 Service
+            if ("init".equals(msg.getType())) {
+                agentService.startTask(sessionId, session, msg.getTask(), msg.getScreenshot(), msg.getScreenInfo());
+            } else if ("step".equals(msg.getType())) {
+                agentService.processStep(sessionId, msg.getScreenshot(), msg.getScreenInfo());
+            }
+        } catch (Exception e) {
+            System.out.println("处理消息失败: " + e.getMessage());
+            e.printStackTrace();
         }
     }
 

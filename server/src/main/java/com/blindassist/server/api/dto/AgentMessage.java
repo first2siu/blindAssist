@@ -2,7 +2,6 @@ package com.blindassist.server.api.dto;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import lombok.Data;
 
 import java.util.Map;
 
@@ -11,7 +10,6 @@ import java.util.Map;
  * Agent 通信协议实体
  * 包含：类型、任务描述、截图数据、以及返回的动作指令
  */
-@Data
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public class AgentMessage {
     // 消息类型: "init" (开始任务), "step" (后续步骤), "action" (执行动作), "error", "finish"
@@ -42,4 +40,29 @@ public class AgentMessage {
         this.screenshot = screenshot;
         this.screenInfo = screenInfo;
     }
+
+    // Getters and Setters
+    public String getType() { return type; }
+    public void setType(String type) { this.type = type; }
+
+    public String getTask() { return task; }
+    public void setTask(String task) { this.task = task; }
+
+    public String getScreenshot() { return screenshot; }
+    public void setScreenshot(String screenshot) { this.screenshot = screenshot; }
+
+    public String getScreenInfo() { return screenInfo; }
+    public void setScreenInfo(String screenInfo) { this.screenInfo = screenInfo; }
+
+    public String getStatus() { return status; }
+    public void setStatus(String status) { this.status = status; }
+
+    public String getThinking() { return thinking; }
+    public void setThinking(String thinking) { this.thinking = thinking; }
+
+    public Map<String, Object> getAction() { return action; }
+    public void setAction(Map<String, Object> action) { this.action = action; }
+
+    public Boolean getFinished() { return finished; }
+    public void setFinished(Boolean finished) { this.finished = finished; }
 }
