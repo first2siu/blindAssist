@@ -177,6 +177,9 @@ public class WebSocketConnectionManager {
 
             @Override
             public void onMessage(@NonNull WebSocket webSocket, @NonNull String text) {
+                // 任何消息都表示连接活跃，更新心跳时间
+                connectionStatus.updateHeartbeat();
+
                 // 检查是否是心跳响应
                 if (isHeartbeatResponse(text)) {
                     handleHeartbeatResponse();

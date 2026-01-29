@@ -7,6 +7,8 @@ import android.graphics.Path;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.Settings;
+import android.text.TextUtils;
 import android.util.Log;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.widget.Toast;
@@ -35,6 +37,27 @@ public class AutoGLMService extends AccessibilityService{
         return instance;
     }
 
+    /**
+     * 检查无障碍服务是否在系统设置中已启用
+     * 这个方法通过检查系统设置来判断，不依赖静态变量 instance
+     */
+    public static boolean isServiceEnabled(Context context) {
+        if (context == null) {
+            return false;
+        }
+        String enabledServices = Settings.Secure.getString(
+                context.getContentResolver(),
+                Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+        );
+        if (enabledServices != null) {
+            // 获取当前服务的完整组件名
+            String serviceName = context.getPackageName() + "/" + AutoGLMService.class.getName();
+            // 检查是否在已启用的服务列表中
+            return enabledServices.contains(serviceName);
+        }
+        return false;
+    }
+
     @Override
     public void onAccessibilityEvent(android.view.accessibility.AccessibilityEvent event) {
         // 监听事件（可选），此处暂不需要主动处理
@@ -43,6 +66,13 @@ public class AutoGLMService extends AccessibilityService{
     @Override
     public void onInterrupt() {
         Log.w(TAG, "服务被中断");
+        instance = null;
+    }
+
+    @Override
+    public void onDestroy() {
+        super.onDestroy();
+        Log.d(TAG, "AutoGLM 无障碍服务已销毁");
         instance = null;
     }
 

@@ -16,6 +16,11 @@ import java.util.Set;
 /**
  * TTS消息队列管理服务
  * 使用Redis Sorted Set实现优先级队列
+ *
+ * 支持功能:
+ * - 优先级队列 (CRITICAL > HIGH > NORMAL > LOW)
+ * - 被打断消息恢复
+ * - 消息持久化
  */
 @Service
 public class TtsMessageQueue {
@@ -23,6 +28,7 @@ public class TtsMessageQueue {
     private static final Logger logger = LoggerFactory.getLogger(TtsMessageQueue.class);
 
     private static final String QUEUE_KEY_PREFIX = "tts:queue:";
+    private static final String INTERRUPTED_KEY_PREFIX = "tts:interrupted:";
     private static final int DEFAULT_BATCH_SIZE = 10;
 
     private final RedisTemplate<String, String> redisTemplate;
@@ -55,6 +61,15 @@ public class TtsMessageQueue {
      */
     public void enqueue(String userId, String content, TtsPriority priority, String source) {
         TtsMessage message = new TtsMessage(userId, content, priority, source);
+        enqueue(userId, message);
+    }
+
+    /**
+     * 入队：便捷方法（带metadata）
+     */
+    public void enqueue(String userId, String content, TtsPriority priority, String source, Object metadata) {
+        TtsMessage message = new TtsMessage(userId, content, priority, source);
+        message.setMetadata(metadata);
         enqueue(userId, message);
     }
 
@@ -128,6 +143,83 @@ public class TtsMessageQueue {
     }
 
     /**
+     * 保存被打断的消息（用于恢复）
+     *
+     * 当高优先级消息（如避障警告）打断当前播报时，
+     * 将被打断的消息保存，以便稍后恢复
+     */
+    public void saveInterrupted(String userId, TtsMessage message) {
+        try {
+            String key = getInterruptedKey(userId);
+            String json = objectMapper.writeValueAsString(message);
+            redisTemplate.opsForValue().set(key, json);
+            logger.debug("Saved interrupted message for user {}: {}", userId, message.getContent());
+        } catch (Exception e) {
+            logger.error("Failed to save interrupted message for user {}", userId, e);
+        }
+    }
+
+    /**
+     * 获取被打断的消息
+     */
+    public TtsMessage getInterrupted(String userId) {
+        try {
+            String key = getInterruptedKey(userId);
+            String json = redisTemplate.opsForValue().get(key);
+            if (json != null) {
+                TtsMessage message = objectMapper.readValue(json, TtsMessage.class);
+                // 获取后删除
+                redisTemplate.delete(key);
+                return message;
+            }
+        } catch (Exception e) {
+            logger.error("Failed to get interrupted message for user {}", userId, e);
+        }
+        return null;
+    }
+
+    /**
+     * 检查是否有被打断的消息
+     */
+    public boolean hasInterrupted(String userId) {
+        try {
+            String key = getInterruptedKey(userId);
+            return Boolean.TRUE.equals(redisTemplate.hasKey(key));
+        } catch (Exception e) {
+            logger.error("Failed to check interrupted message for user {}", userId, e);
+            return false;
+        }
+    }
+
+    /**
+     * 将被打断的消息重新加入队列（优先级提升，保证下次能被获取）
+     */
+    public void restoreInterrupted(String userId) {
+        TtsMessage interrupted = getInterrupted(userId);
+        if (interrupted != null) {
+            // 提升优先级，确保恢复的消息优先播放
+            TtsPriority newPriority = interrupted.getPriority() == TtsPriority.CRITICAL
+                ? TtsPriority.CRITICAL
+                : TtsPriority.HIGH;
+            interrupted.setPriority(newPriority);
+            enqueue(userId, interrupted);
+            logger.info("Restored interrupted message for user {}: {}", userId, interrupted.getContent());
+        }
+    }
+
+    /**
+     * 清空被打断的消息
+     */
+    public void clearInterrupted(String userId) {
+        try {
+            String key = getInterruptedKey(userId);
+            redisTemplate.delete(key);
+        } catch (Exception e) {
+            logger.error("Failed to clear interrupted message for user {}", userId, e);
+        }
+    }
+
+    /**
      * 获取队列大小
      */
     public long size(String userId) {
@@ -172,5 +264,12 @@ public class TtsMessageQueue {
      */
     private String getQueueKey(String userId) {
         return QUEUE_KEY_PREFIX + userId;
+    }
+
+    /**
+     * 获取被打断消息的Redis key
+     */
+    private String getInterruptedKey(String userId) {
+        return INTERRUPTED_KEY_PREFIX + userId;
     }
 }

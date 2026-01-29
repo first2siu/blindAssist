@@ -24,4 +24,13 @@ public enum TtsPriority {
     public String getDescription() {
         return description;
     }
+
+    public static TtsPriority fromValue(int value) {
+        for (TtsPriority priority : values()) {
+            if (priority.value == value) {
+                return priority;
+            }
+        }
+        return NORMAL; // 默认返回普通优先级
+    }
 }

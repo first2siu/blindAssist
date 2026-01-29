@@ -13,6 +13,8 @@ public class FastApiProperties {
     private Service intentClassifier;
     private Service autoglm;
     private Service obstacle;
+    private String websocketBaseUrl;
+    private String websocketNavigationBaseUrl;
 
     public static class Service {
         private String baseUrl;
@@ -37,4 +39,12 @@ public class FastApiProperties {
 
     public Service getObstacle() { return obstacle; }
     public void setObstacle(Service obstacle) { this.obstacle = obstacle; }
+
+    public String getWebsocketBaseUrl() { return websocketBaseUrl; }
+    public void setWebsocketBaseUrl(String websocketBaseUrl) { this.websocketBaseUrl = websocketBaseUrl; }
+
+    public String getWebsocketNavigationBaseUrl() { return websocketNavigationBaseUrl; }
+    public void setWebsocketNavigationBaseUrl(String websocketNavigationBaseUrl) {
+        this.websocketNavigationBaseUrl = websocketNavigationBaseUrl;
+    }
 }

@@ -6,6 +6,7 @@ Thumbs.db
 *.iml
 .idea/
 .vscode/
+.claude/
 
 # ---- Gradle / Android ----
 .gradle/
@@ -18,12 +19,12 @@ gradle.properties
 # Android Studio
 captures/
 .externalNativeBuild/
-.gradle/
 
 # Log / temp
 *.log
 *.tmp
 *.temp
+nul
 
 # ---- Java / Maven ----
 server/target/
@@ -43,19 +44,9 @@ server/mvnw.cmd
 *.orig
 *.bak
 
-*.iml
-.gradle
-/local.properties
-/.idea/caches
-/.idea/libraries
-/.idea/modules.xml
-/.idea/workspace.xml
-/.idea/navEditor.xml
-/.idea/assetWizardSettings.xml
-.DS_Store
-/build
-/captures
-.externalNativeBuild
-.cxx
-local.properties
-gradle.properties
+# ---- Sensitive Configuration Files ----
+# DO NOT commit files with API keys, passwords, or private IPs
+server/src/main/resources/application.properties
+
+# ---- Old specs directory ----
+.kiro/specs/

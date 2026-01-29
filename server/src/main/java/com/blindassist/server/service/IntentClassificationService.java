@@ -24,6 +24,24 @@ public class IntentClassificationService {
 
     private static final Logger logger = LoggerFactory.getLogger(IntentClassificationService.class);
 
+    // 停止/取消相关关键词
+    private static final List<String> STOP_KEYWORDS = List.of(
+        "停止", "取消", "结束", "退出", "不做了", "不要了", "算了", "关闭", "停下",
+        "stop", "cancel", "end", "exit", "quit", "abort"
+    );
+
+    // 暂停相关关键词
+    private static final List<String> PAUSE_KEYWORDS = List.of(
+        "暂停", "停一下", "等一下", "等等", "稍等", "先别动", "休息一下",
+        "pause", "wait", "hold on"
+    );
+
+    // 恢复相关关键词
+    private static final List<String> RESUME_KEYWORDS = List.of(
+        "继续", "恢复", "接着走", "继续导航", "好了", "开始了", "走吧",
+        "resume", "continue", "go on"
+    );
+
     // 导航相关关键词
     private static final List<String> NAVIGATION_KEYWORDS = List.of(
         "去", "到", "导航", "怎么走", "带我去", "想去", "去往", "前往",
@@ -71,7 +89,28 @@ public class IntentClassificationService {
      * 基于规则的意图分类
      */
     private IntentResult classifyByRule(String text) {
-        // 检查导航意图
+        // 1. 优先检查停止/取消命令（最高优先级）
+        for (String keyword : STOP_KEYWORDS) {
+            if (text.contains(keyword)) {
+                return new IntentResult("STOP", "停止当前任务", 1.0);
+            }
+        }
+
+        // 2. 检查暂停命令（高优先级）
+        for (String keyword : PAUSE_KEYWORDS) {
+            if (text.contains(keyword)) {
+                return new IntentResult("PAUSE", "暂停当前任务", 0.95);
+            }
+        }
+
+        // 3. 检查恢复命令（高优先级）
+        for (String keyword : RESUME_KEYWORDS) {
+            if (text.contains(keyword)) {
+                return new IntentResult("RESUME", "恢复当前任务", 0.95);
+            }
+        }
+
+        // 4. 检查导航意图
         for (String keyword : NAVIGATION_KEYWORDS) {
             if (text.contains(keyword)) {
                 // 排除"打开导航设置"等应用内操作
@@ -82,14 +121,14 @@ public class IntentClassificationService {
             }
         }
 
-        // 检查避障意图
+        // 5. 检查避障意图
         for (String keyword : OBSTACLE_KEYWORDS) {
             if (text.contains(keyword)) {
                 return new IntentResult("OBSTACLE", "环境感知", 0.9);
             }
         }
 
-        // 默认为手机操控
+        // 6. 默认为手机操控
         return new IntentResult("PHONE_CONTROL", "手机操控", 0.7);
     }
 

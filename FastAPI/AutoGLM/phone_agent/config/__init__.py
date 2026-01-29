@@ -1,0 +1,69 @@
+"""Configuration module for Phone Agent."""
+
+from phone_agent.config.apps import APP_PACKAGES
+from phone_agent.config.apps_ios import APP_PACKAGES_IOS
+from phone_agent.config.i18n import get_message, get_messages
+from phone_agent.config.prompts_en import SYSTEM_PROMPT as SYSTEM_PROMPT_EN
+from phone_agent.config.prompts_zh import SYSTEM_PROMPT as SYSTEM_PROMPT_ZH
+from phone_agent.config.prompts_navigation import (
+    NAVIGATION_SYSTEM_PROMPT,
+    get_relative_direction,
+    meters_to_steps,
+    format_navigation_instruction,
+    detect_navigation_scenario,
+)
+from phone_agent.config.timing import (
+    TIMING_CONFIG,
+    ActionTimingConfig,
+    ConnectionTimingConfig,
+    DeviceTimingConfig,
+    TimingConfig,
+    get_timing_config,
+    update_timing_config,
+)
+
+
+def get_system_prompt(lang: str = "cn", mode: str = "phone") -> str:
+    """
+    Get system prompt by language and mode.
+
+    Args:
+        lang: Language code, 'cn' for Chinese, 'en' for English.
+        mode: Operation mode, 'phone' for control, 'navigation' for navigation.
+
+    Returns:
+        System prompt string.
+    """
+    if mode == "navigation":
+        return NAVIGATION_SYSTEM_PROMPT
+
+    if lang == "en":
+        return SYSTEM_PROMPT_EN
+    return SYSTEM_PROMPT_ZH
+
+
+# Default to Chinese for backward compatibility
+SYSTEM_PROMPT = SYSTEM_PROMPT_ZH
+
+__all__ = [
+    "APP_PACKAGES",
+    "APP_PACKAGES_IOS",
+    "SYSTEM_PROMPT",
+    "SYSTEM_PROMPT_ZH",
+    "SYSTEM_PROMPT_EN",
+    "NAVIGATION_SYSTEM_PROMPT",
+    "get_system_prompt",
+    "get_messages",
+    "get_message",
+    "TIMING_CONFIG",
+    "TimingConfig",
+    "ActionTimingConfig",
+    "DeviceTimingConfig",
+    "ConnectionTimingConfig",
+    "get_timing_config",
+    "update_timing_config",
+    "get_relative_direction",
+    "meters_to_steps",
+    "format_navigation_instruction",
+    "detect_navigation_scenario",
+]

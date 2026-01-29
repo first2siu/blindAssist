@@ -1,0 +1,7 @@
+"""Requirements for Intent Classifier service."""
+
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+pydantic>=2.0.0
+openai>=1.0.0
+huggingface-hub>=0.17.0

@@ -16,8 +16,8 @@ import okio.ByteString;
 public class NetworkClient {
     private static NetworkClient instance;
     private OkHttpClient client;
-    private static final String BASE_URL = "http://your-backend-api.com";
-    private static final String WS_URL = "ws://your-backend-api.com/ws/obstacle";
+    private static final String BASE_URL = "http://10.181.78.161:8090";
+    private static final String WS_URL = "ws://10.181.78.161:8090/ws/obstacle";
     private WebSocket webSocket;
 
     private NetworkClient() {

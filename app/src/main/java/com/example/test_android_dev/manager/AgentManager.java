@@ -6,7 +6,9 @@ import android.os.Looper;
 import android.util.Log;
 
 import com.example.test_android_dev.App;
+import com.example.test_android_dev.LocationHelper;
 import com.example.test_android_dev.model.ConnectionState;
+import com.example.test_android_dev.model.LocationInfo;
 import com.example.test_android_dev.model.TaskState;
 import com.example.test_android_dev.service.AutoGLMService;
 import com.example.test_android_dev.service.BackgroundKeepAliveService;
@@ -20,7 +22,7 @@ import java.util.Map;
 
 public class AgentManager {
     private static final String TAG = "AgentManager";
-    private static final String SERVER_URL = "ws://localhost:8090/ws/agent";
+    private static final String SERVER_URL = "ws://10.181.78.161:8090/ws/agent";
 
     private static AgentManager instance;
     private final Gson gson = new Gson();
@@ -35,6 +37,10 @@ public class AgentManager {
     private int screenWidth;
     private int screenHeight;
     private Context appContext;
+
+    // 服务连接重试计数器
+    private int serviceRetryCount = 0;
+    private static final int MAX_SERVICE_RETRY = 10;
 
     private AgentManager() {
         connectionManager = WebSocketConnectionManager.getInstance();
@@ -57,10 +63,21 @@ public class AgentManager {
     }
 
     public void startTask(String taskPrompt, int width, int height) {
-        Log.d(TAG, "startTask: " + taskPrompt);
+        Log.d(TAG, "========== startTask ==========");
+        Log.d(TAG, "任务: " + taskPrompt);
+        Log.d(TAG, "屏幕尺寸: " + width + "x" + height);
+        Log.d(TAG, "当前任务状态: " + (isTaskRunning ? "运行中" : "未运行"));
+
+        // 如果已有任务在运行，先停止它（支持任务切换）
         if (isTaskRunning) {
-            Log.w(TAG, "任务已在运行中");
-            return;
+            Log.i(TAG, "检测到已有任务运行中，先停止旧任务再启动新任务");
+            stopTask();
+            // 等待旧任务清理完成
+            try {
+                Thread.sleep(500);
+            } catch (InterruptedException e) {
+                Log.w(TAG, "任务切换等待被中断");
+            }
         }
 
         this.screenWidth = width;
@@ -77,11 +94,33 @@ public class AgentManager {
             BackgroundKeepAliveService.start(appContext, taskPrompt);
         }
 
+        // 获取 GPS 位置（异步，使用缓存位置或请求新位置）
+        LocationHelper locationHelper = LocationHelper.getInstance(appContext);
+        LocationInfo cachedLocation = locationHelper.getCachedLocation();
+        if (cachedLocation != null) {
+            Log.d(TAG, "使用缓存 GPS: " + cachedLocation);
+        } else {
+            Log.d(TAG, "请求 GPS 位置更新...");
+            locationHelper.getCurrentLocation(location -> {
+                if (location != null) {
+                    Log.d(TAG, "获取到新 GPS: " + location);
+                } else {
+                    Log.w(TAG, "GPS 位置获取失败");
+                }
+            });
+        }
+
+        Log.d(TAG, "准备连接 WebSocket...");
         connectWebSocket(taskPrompt);
     }
 
     public void stopTask() {
-        Log.d(TAG, "停止任务");
+        Log.d(TAG, "========== stopTask 被调用 ==========");
+        Log.d(TAG, "调用堆栈:");
+        for (StackTraceElement element : Thread.currentThread().getStackTrace()) {
+            Log.d(TAG, "    " + element.toString());
+        }
+
         isTaskRunning = false;
         connectionManager.disconnect();
         wakeLockManager.release();
@@ -131,15 +170,38 @@ public class AgentManager {
 
 
     private void connectWebSocket(String initTask) {
+        // 重置服务重试计数器
+        serviceRetryCount = 0;
+
+        Log.d(TAG, "========== 开始连接 WebSocket ==========");
+        Log.d(TAG, "服务器地址: " + SERVER_URL);
+
+        // 确保先断开旧连接（防止重复连接）
+        ConnectionState currentState = connectionManager.getConnectionState();
+        if (currentState == ConnectionState.CONNECTED || currentState == ConnectionState.CONNECTING) {
+            Log.w(TAG, "检测到已有活跃连接，先断开");
+            connectionManager.disconnect();
+            // 等待断开完成
+            try {
+                Thread.sleep(200);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+
         connectionManager.connect(SERVER_URL, new WebSocketConnectionManager.ConnectionCallback() {
             @Override
             public void onConnected() {
+                Log.d(TAG, "========== WebSocket 已连接 ==========");
                 updateServiceState(ConnectionState.CONNECTED);
+                Log.d(TAG, "准备截图并发送 init 消息...");
                 captureAndSend(true, initTask);
             }
 
             @Override
             public void onDisconnected(String reason) {
+                Log.d(TAG, "========== WebSocket 已断开 ==========");
+                Log.d(TAG, "断开原因: " + reason);
                 updateServiceState(ConnectionState.DISCONNECTED);
             }
 
@@ -175,12 +237,51 @@ public class AgentManager {
     }
 
     public void sendInit(String task, String base64Image) {
+        Log.d(TAG, "========== sendInit ==========");
+        Log.d(TAG, "任务: " + task);
+        Log.d(TAG, "截图长度: " + (base64Image != null ? base64Image.length() : 0));
+
+        // 获取 GPS 位置
+        LocationHelper locationHelper = LocationHelper.getInstance();
+        LocationInfo location = null;
+        if (locationHelper != null) {
+            location = locationHelper.getCachedLocation();
+        }
+        if (location != null) {
+            Log.d(TAG, "GPS位置: " + location);
+        } else {
+            Log.w(TAG, "GPS位置不可用，使用 null");
+        }
+
         JsonObject json = new JsonObject();
         json.addProperty("type", "init");
         json.addProperty("task", task);
         json.addProperty("screenshot", base64Image);
         json.addProperty("screen_info", "Android Screen");
-        connectionManager.send(gson.toJson(json));
+
+        // 添加 GPS 位置信息
+        if (location != null) {
+            JsonObject locationJson = new JsonObject();
+            locationJson.addProperty("latitude", location.getLatitude());
+            locationJson.addProperty("longitude", location.getLongitude());
+            if (location.getAltitude() != null) {
+                locationJson.addProperty("altitude", location.getAltitude());
+            }
+            if (location.getHeading() != null) {
+                locationJson.addProperty("heading", location.getHeading());
+            }
+            if (location.getAccuracy() != null) {
+                locationJson.addProperty("accuracy", location.getAccuracy());
+            }
+            locationJson.addProperty("timestamp", location.getTimestamp() != null ? location.getTimestamp() : System.currentTimeMillis());
+            json.add("location", locationJson);
+        }
+
+        String jsonString = gson.toJson(json);
+        Log.d(TAG, "消息长度: " + jsonString.length());
+
+        boolean sent = connectionManager.send(jsonString);
+        Log.d(TAG, "发送结果: " + (sent ? "成功" : "失败"));
     }
 
     private void sendStep(String base64Image) {
@@ -196,6 +297,31 @@ public class AgentManager {
     private void handleServerMessage(String text) {
         try {
             JsonObject response = gson.fromJson(text, JsonObject.class);
+
+            // 处理停止状态（来自服务端的 STOP 意图响应）
+            if (response.has("status") && "stopped".equals(response.get("status").getAsString())) {
+                String msg = "任务已停止";
+                if (response.has("message")) {
+                    msg = response.get("message").getAsString();
+                }
+                Log.i(TAG, "收到服务器停止指令: " + msg);
+                showToast(msg);
+                stopTask();
+                return;
+            }
+
+            // 处理错误状态
+            if (response.has("status") && "error".equals(response.get("status").getAsString())) {
+                String errorMsg = "操作出错";
+                if (response.has("message")) {
+                    errorMsg = response.get("message").getAsString();
+                }
+                Log.e(TAG, "服务器返回错误: " + errorMsg);
+                showToast(errorMsg);
+                // 可选：是否要在错误时停止任务
+                // stopTask();
+                return;
+            }
 
             if (response.has("finished") && response.get("finished").getAsBoolean()) {
                 String msg = "任务完成";
@@ -238,17 +364,41 @@ public class AgentManager {
     }
 
     private void captureAndSend(boolean isInit, String taskPrompt) {
-        if (!isTaskRunning) return;
-        AutoGLMService service = AutoGLMService.getInstance();
-        if (service == null) {
-            stopTask();
+        Log.d(TAG, "---------- captureAndSend ----------");
+        Log.d(TAG, "isInit: " + isInit + ", taskPrompt: " + taskPrompt);
+        Log.d(TAG, "isTaskRunning: " + isTaskRunning);
+
+        if (!isTaskRunning) {
+            Log.w(TAG, "任务未运行，退出 captureAndSend");
             return;
         }
+
+        AutoGLMService service = AutoGLMService.getInstance();
+        Log.d(TAG, "AutoGLMService: " + (service != null ? "已连接" : "NULL"));
+
+        if (service == null) {
+            // 无障碍服务尚未绑定，延迟重试
+            if (serviceRetryCount < MAX_SERVICE_RETRY) {
+                serviceRetryCount++;
+                Log.w(TAG, "无障碍服务未就绪(" + serviceRetryCount + "/" + MAX_SERVICE_RETRY + ")，1秒后重试...");
+                mainHandler.postDelayed(() -> captureAndSend(isInit, taskPrompt), 1000);
+            } else {
+                Log.e(TAG, "无障碍服务重试超时，停止任务");
+                showToast("无障碍服务连接超时，请检查设置");
+                stopTask();
+            }
+            return;
+        }
+
+        // 服务已连接，重置计数器
+        serviceRetryCount = 0;
+        Log.d(TAG, "无障碍服务已就绪，开始截图...");
 
         AccessibilityScreenshotManager.getInstance().capture(service,
             new AccessibilityScreenshotManager.ScreenshotCallback() {
                 @Override
                 public void onSuccess(String base64) {
+                    Log.d(TAG, "截图成功，准备发送消息...");
                     if (isInit) sendInit(taskPrompt, base64);
                     else sendStep(base64);
                 }
@@ -256,6 +406,10 @@ public class AgentManager {
                 @Override
                 public void onFailure(String error) {
                     Log.e(TAG, "截图失败: " + error);
+                    // 截图失败时短暂重试
+                    if (isInit) {
+                        mainHandler.postDelayed(() -> captureAndSend(isInit, taskPrompt), 500);
+                    }
                 }
             });
     }

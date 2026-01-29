@@ -3,52 +3,81 @@ package com.blindassist.server.service;
 import com.blindassist.server.api.dto.NavigationRouteRequest;
 import com.blindassist.server.api.dto.NavigationRouteResponse;
 import com.blindassist.server.config.AmapProperties;
-import com.blindassist.server.config.FastApiProperties;
 import com.blindassist.server.model.SensorData;
+import com.blindassist.server.model.TtsPriority;
 import com.blindassist.server.tts.TtsMessageQueue;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.http.HttpEntity;
-import org.springframework.http.HttpHeaders;
-import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 导航服务
- * 负责路径规划和导航指令的"盲人友好化"处理
+ * 与 AutoGLM 配合提供导航功能，导航指令通过 Redis TTS 队列播报
  */
 @Service
 public class NavigationService {
 
     private static final Logger logger = LoggerFactory.getLogger(NavigationService.class);
 
-    private final FastApiProperties fastApiProperties;
     private final AmapProperties amapProperties;
-    private final TtsMessageQueue ttsQueue;
     private final RestTemplate restTemplate;
     private final ObjectMapper objectMapper;
+    private final TtsMessageQueue ttsQueue;
 
-    public NavigationService(FastApiProperties fastApiProperties,
-                            AmapProperties amapProperties,
-                            TtsMessageQueue ttsQueue) {
-        this.fastApiProperties = fastApiProperties;
+    // 存储活跃导航会话的状态
+    private final Map<String, NavigationSession> activeSessions = new ConcurrentHashMap<>();
+
+    public NavigationService(AmapProperties amapProperties, TtsMessageQueue ttsQueue) {
         this.amapProperties = amapProperties;
-        this.ttsQueue = ttsQueue;
         this.restTemplate = new RestTemplate();
         this.objectMapper = new ObjectMapper();
+        this.ttsQueue = ttsQueue;
+    }
+
+    /**
+     * 导航会话状态
+     */
+    public static class NavigationSession {
+        private String userId;
+        private String destination;
+        private double destinationLat;
+        private double destinationLng;
+        private long startTime;
+        private int lastStepIndex = -1;
+
+        public NavigationSession(String userId, String destination, double lat, double lng) {
+            this.userId = userId;
+            this.destination = destination;
+            this.destinationLat = lat;
+            this.destinationLng = lng;
+            this.startTime = System.currentTimeMillis();
+        }
+
+        // Getters and Setters
+        public String getUserId() { return userId; }
+        public String getDestination() { return destination; }
+        public double getDestinationLat() { return destinationLat; }
+        public double getDestinationLng() { return destinationLng; }
+        public long getStartTime() { return startTime; }
+        public int getLastStepIndex() { return lastStepIndex; }
+        public void setLastStepIndex(int index) { this.lastStepIndex = index; }
     }
 
     /**
      * 规划导航路线（HTTP API接口）
-     * 调用高德地图API获取步行路线，并转换为语音步骤
+     * 提供基础的路径规划功能，实际导航指令由 AutoGLM 通过 WebSocket 处理
+     *
+     * @deprecated 实际导航应通过 AutoGLM WebSocket 连接处理
      */
+    @Deprecated
     public NavigationRouteResponse planRoute(NavigationRouteRequest req) {
         NavigationRouteResponse response = new NavigationRouteResponse();
         List<String> voiceSteps = new ArrayList<>();
@@ -57,9 +86,6 @@ public class NavigationService {
             // 调用高德地图步行路径规划API
             String url = "https://restapi.amap.com/v3/direction/walking";
             String apiKey = amapProperties.getApiKey();
-
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_JSON);
 
             String requestUrl = String.format("%s?key=%s&origin=%s,%s&destination=%s,%s",
                 url,
@@ -79,7 +105,7 @@ public class NavigationService {
                 if (steps.isArray()) {
                     for (JsonNode step : steps) {
                         String instruction = step.path("instruction").asText();
-                        // 转换为语音友好的格式
+                        // 基础转换，实际友好化由 AutoGLM 处理
                         voiceSteps.add(convertToVoiceInstruction(instruction));
                     }
                 }
@@ -95,158 +121,159 @@ public class NavigationService {
     }
 
     /**
-     * 将导航指令转换为语音播报格式
+     * 基础指令转换（仅用于备用，实际由 AutoGLM 处理）
      */
     private String convertToVoiceInstruction(String instruction) {
-        // 简化指令，更适合语音播报
-        String result = instruction
+        return instruction
             .replace("沿", "")
             .replace("向前", "直行")
             .replace("向左", "左转")
             .replace("向右", "右转");
-
-        // 将米转换为步数（1步≈0.65米）
-        java.util.regex.Pattern pattern = java.util.regex.Pattern.compile("(\\d+)米");
-        java.util.regex.Matcher matcher = pattern.matcher(result);
-        StringBuffer sb = new StringBuffer();
-        while (matcher.find()) {
-            int meters = Integer.parseInt(matcher.group(1));
-            int steps = (int) Math.round(meters / 0.65);
-            matcher.appendReplacement(sb, steps + "步");
-        }
-        matcher.appendTail(sb);
-
-        return sb.toString();
     }
 
     /**
-     * 规划导航路线
+     * 开始导航
+     * 创建导航会话并发送初始提示到TTS队列
+     *
      * @param userId 用户ID
-     * @param destination 目的地描述
-     * @param sensorData 用户当前传感器数据
+     * @param destination 目的地名称
+     * @param destinationLat 目的地纬度
+     * @param destinationLng 目的地经度
      */
-    public void startNavigation(String userId, String destination, SensorData sensorData) {
-        logger.info("Starting navigation for user {} to: {}", userId, destination);
+    public void startNavigation(String userId, String destination,
+                                double destinationLat, double destinationLng,
+                                SensorData sensorData) {
+        logger.info("Start navigation for user {}, destination: {} ({}, {})",
+                    userId, destination, destinationLat, destinationLng);
 
-        try {
-            // 调用AutoGLM导航接口
-            String response = callAutoGLMNavigation(destination, sensorData);
-            processNavigationResponse(userId, response);
+        // 创建导航会话
+        NavigationSession session = new NavigationSession(userId, destination, destinationLat, destinationLng);
+        activeSessions.put(userId, session);
 
-        } catch (Exception e) {
-            logger.error("Navigation failed for user {}", userId, e);
-            // 发送错误提示
-            ttsQueue.enqueue(userId, "导航启动失败，请重试",
-                           com.blindassist.server.model.TtsPriority.LOW, "navigation");
-        }
-    }
-
-    /**
-     * 调用AutoGLM导航接口
-     */
-    private String callAutoGLMNavigation(String destination, SensorData sensorData) throws Exception {
-        String url = fastApiProperties.getAutoglm().getBaseUrl() + "/chat/completions";
-
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.APPLICATION_JSON);
-
-        // 构造导航请求
-        Map<String, Object> request = Map.of(
-            "model", fastApiProperties.getAutoglm().getModel(),
-            "messages", List.of(
-                Map.of(
-                    "role", "user",
-                    "content", buildNavigationPrompt(destination, sensorData)
-                )
-            ),
-            "temperature", 0.3,
-            "max_tokens", 500
-        );
-
-        HttpEntity<Map<String, Object>> entity = new HttpEntity<>(request, headers);
-        return restTemplate.postForObject(url, entity, String.class);
-    }
-
-    /**
-     * 构造导航Prompt
-     */
-    private String buildNavigationPrompt(String destination, SensorData sensorData) {
-        return String.format("""
-            你是一个为视障人士服务的导航助手。请帮助用户规划到目的地的路线。
-
-            用户请求：%s
-
-            用户当前状态：
-            - 位置：%.6f, %.6f
-            - 朝向：%.1f度（%s）
-
-            请按以下步骤处理：
-            1. 调用高德地图API获取从当前位置到目的地的步行路线
-            2. 提取第一条导航指令
-            3. 将指令转化为"盲人友好"的形式：
-               - 绝对方向（东南西北）根据用户朝向转换为相对方向（左前右后）
-               - 距离（米）转换为步数（1步≈0.65米）
-               - 使用简洁明了的语言
-
-            返回格式（JSON）：
-            {
-              "instruction": "转换后的导航指令",
-              "distance": "剩余距离（米）",
-              "urgency": "normal/important",
-              "next_step": "下一步的简短提示"
-            }
-            """,
-            destination,
-            sensorData.getLatitude(),
-            sensorData.getLongitude(),
-            sensorData.getHeading(),
-            sensorData.getHeadingText()
-        );
-    }
-
-    /**
-     * 处理导航响应
-     */
-    private void processNavigationResponse(String userId, String response) {
-        try {
-            JsonNode root = objectMapper.readTree(response);
-            String content = root.path("choices").get(0).path("message").path("content").asText();
-
-            // 解析LLM返回的JSON
-            JsonNode result = objectMapper.readTree(content);
-
-            String instruction = result.path("instruction").asText();
-            String urgency = result.path("urgency").asText("normal");
-
-            // 根据urgency确定优先级
-            com.blindassist.server.model.TtsPriority priority =
-                "important".equals(urgency) || "critical".equals(urgency) ?
-                com.blindassist.server.model.TtsPriority.HIGH :
-                com.blindassist.server.model.TtsPriority.NORMAL;
-
-            // 将导航指令加入TTS队列
-            ttsQueue.enqueue(userId, instruction, priority, "navigation");
-
-            logger.info("Navigation instruction queued for user {}: {}", userId, instruction);
-
-        } catch (Exception e) {
-            logger.error("Failed to process navigation response", e);
-        }
+        // 发送导航开始提示到TTS队列（NORMAL优先级，可被避障打断）
+        String startMessage = "开始导航，前往" + destination;
+        ttsQueue.enqueue(userId, startMessage, TtsPriority.NORMAL, "navigation");
     }
 
     /**
      * 停止导航
+     * 结束导航会话并发送停止提示
+     *
+     * @param userId 用户ID
+     * @param reason 停止原因（到达目的地/用户取消/错误等）
      */
-    public void stopNavigation(String userId) {
-        logger.info("Stopping navigation for user {}", userId);
-        ttsQueue.clear(userId);
+    public void stopNavigation(String userId, String reason) {
+        logger.info("Stop navigation for user {}, reason: {}", userId, reason);
+
+        // 移除导航会话
+        NavigationSession session = activeSessions.remove(userId);
+
+        if (session != null) {
+            // 发送导航结束提示
+            String stopMessage;
+            switch (reason) {
+                case "arrived":
+                    stopMessage = "已到达目的地" + session.getDestination();
+                    break;
+                case "cancelled":
+                    stopMessage = "导航已取消";
+                    break;
+                case "off_route":
+                    stopMessage = "偏离路线，导航已停止";
+                    break;
+                default:
+                    stopMessage = "导航已结束";
+            }
+            ttsQueue.enqueue(userId, stopMessage, TtsPriority.NORMAL, "navigation");
+        }
     }
 
     /**
-     * 更新导航指令（基于新的传感器数据）
+     * 停止导航（简化版本，默认原因为用户取消）
+     */
+    public void stopNavigation(String userId) {
+        stopNavigation(userId, "cancelled");
+    }
+
+    /**
+     * 更新导航位置
+     * 当用户位置更新时调用，检查是否需要发送新的导航指令
+     *
+     * @param userId 用户ID
+     * @param sensorData 传感器数据（包含GPS位置）
+     * @param nextStepInstruction 下一步指令（由AutoGLM计算）
+     * @param stepIndex 当前步骤索引
+     */
+    public void updateNavigation(String userId, SensorData sensorData,
+                                String nextStepInstruction, int stepIndex) {
+        logger.debug("Navigation update for user: {}, step: {}", userId, stepIndex);
+
+        NavigationSession session = activeSessions.get(userId);
+        if (session == null) {
+            logger.warn("No active navigation session for user {}", userId);
+            return;
+        }
+
+        // 只有步骤索引变化时才发送新指令（避免重复播报）
+        if (stepIndex > session.getLastStepIndex()) {
+            session.setLastStepIndex(stepIndex);
+
+            if (nextStepInstruction != null && !nextStepInstruction.isEmpty()) {
+                // 发送导航指令到TTS队列（NORMAL优先级，可被避障打断）
+                ttsQueue.enqueue(userId, nextStepInstruction, TtsPriority.NORMAL, "navigation");
+                logger.debug("Enqueued navigation instruction for user {}: {}", userId, nextStepInstruction);
+            }
+        }
+    }
+
+    /**
+     * 更新导航位置（简化版本，仅更新GPS）
      */
     public void updateNavigation(String userId, SensorData sensorData) {
-        logger.debug("Updating navigation for user {} at position: {}, {}",
+        NavigationSession session = activeSessions.get(userId);
+        if (session == null) {
+            logger.debug("No active navigation session for user {}", userId);
+            return;
+        }
+
+        // 这里可以添加基于GPS的位置更新逻辑
+        // 例如：检查是否偏离路线、是否接近目的地等
+        logger.debug("GPS update for user {}: lat={}, lng={}",
                     userId, sensorData.getLatitude(), sensorData.getLongitude());
+    }
+
+    /**
+     * 发送导航指令到TTS队列
+     * 供其他服务（如AutoGLM）直接调用
+     *
+     * @param userId 用户ID
+     * @param instruction 导航指令文本
+     * @param priority 优先级（可选，默认NORMAL）
+     */
+    public void sendNavigationInstruction(String userId, String instruction, TtsPriority priority) {
+        TtsPriority actualPriority = (priority != null) ? priority : TtsPriority.NORMAL;
+        ttsQueue.enqueue(userId, instruction, actualPriority, "navigation");
+        logger.debug("Sent navigation instruction to user {}: {}", userId, instruction);
+    }
+
+    /**
+     * 检查用户是否有活跃的导航会话
+     */
+    public boolean hasActiveNavigation(String userId) {
+        return activeSessions.containsKey(userId);
+    }
+
+    /**
+     * 获取用户的导航会话
+     */
+    public NavigationSession getNavigationSession(String userId) {
+        return activeSessions.get(userId);
+    }
+
+    /**
+     * 清除指定用户的导航会话（内部使用，不发送TTS）
+     */
+    public void clearNavigationSession(String userId) {
+        activeSessions.remove(userId);
     }
 }

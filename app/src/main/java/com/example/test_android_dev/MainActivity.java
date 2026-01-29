@@ -33,6 +33,7 @@ import com.example.test_android_dev.manager.TaskStateManager;
 import com.example.test_android_dev.model.TaskState;
 import com.example.test_android_dev.service.AutoGLMService;
 import com.example.test_android_dev.asr.AsrManager;
+import com.example.test_android_dev.LocationHelper;
 
 /**
  * 应用入口 Activity
@@ -329,26 +330,59 @@ public class MainActivity extends AppCompatActivity {
         // 检查无障碍服务
         AutoGLMService service = AutoGLMService.getInstance();
         Log.d(TAG, "AutoGLMService.getInstance() 返回: " + (service != null ? "非空" : "null"));
-        
+
         if (service == null) {
-            Log.w(TAG, "无障碍服务未启动，引导用户开启");
-            Toast.makeText(this, "请先开启无障碍服务！", Toast.LENGTH_LONG).show();
-            VoiceManager.getInstance().speak("请先开启无障碍服务");
-            Intent intent = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
-            startActivity(intent);
-            return;
+            // 检查系统中是否已启用无障碍服务（不依赖静态变量）
+            boolean isEnabled = AutoGLMService.isServiceEnabled(this);
+            Log.d(TAG, "系统中无障碍服务启用状态: " + isEnabled);
+
+            if (!isEnabled) {
+                Log.w(TAG, "无障碍服务未启用，引导用户开启");
+                Toast.makeText(this, "请先开启无障碍服务！", Toast.LENGTH_LONG).show();
+                VoiceManager.getInstance().speak("请先开启无障碍服务");
+                Intent intent = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
+                startActivity(intent);
+                return;
+            } else {
+                // 服务已启用但 instance 为空，等待服务连接
+                Log.w(TAG, "无障碍服务已启用，但尚未连接，等待连接...");
+                Toast.makeText(this, "正在连接无障碍服务...", Toast.LENGTH_SHORT).show();
+                // 短暂延迟后重试（给系统时间连接服务）
+                new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+                    retryHandleVoiceResult(text);
+                }, 1000);
+                return;
+            }
         }
 
         Log.d(TAG, "无障碍服务已启动，准备启动任务");
-        
+
         // 获取屏幕尺寸并启动任务
         DisplayMetrics metrics = new DisplayMetrics();
         getWindowManager().getDefaultDisplay().getRealMetrics(metrics);
         int width = metrics.widthPixels;
         int height = metrics.heightPixels;
-        
+
         Log.d(TAG, "屏幕尺寸: " + width + "x" + height);
         AgentManager.getInstance().startTask(text, width, height);
+    }
+
+    /**
+     * 重试处理语音结果（等待服务连接后）
+     */
+    private void retryHandleVoiceResult(String text) {
+        AutoGLMService service = AutoGLMService.getInstance();
+        if (service != null) {
+            Log.d(TAG, "服务已连接，继续执行任务");
+            DisplayMetrics metrics = new DisplayMetrics();
+            getWindowManager().getDefaultDisplay().getRealMetrics(metrics);
+            int width = metrics.widthPixels;
+            int height = metrics.heightPixels;
+            AgentManager.getInstance().startTask(text, width, height);
+        } else {
+            Log.w(TAG, "服务仍未连接，提示用户");
+            Toast.makeText(this, "无障碍服务连接超时，请重试", Toast.LENGTH_SHORT).show();
+        }
     }
 
     /**
@@ -356,10 +390,14 @@ public class MainActivity extends AppCompatActivity {
      */
     private void startTest(String command) {
         // 检查无障碍服务是否开启
-        if (AutoGLMService.getInstance() == null) {
+        AutoGLMService service = AutoGLMService.getInstance();
+        if (service == null && !AutoGLMService.isServiceEnabled(this)) {
             Toast.makeText(this, "请先开启无障碍服务！", Toast.LENGTH_LONG).show();
             Intent intent = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
             startActivity(intent);
+            return;
+        } else if (service == null) {
+            Toast.makeText(this, "等待无障碍服务连接...", Toast.LENGTH_SHORT).show();
             return;
         }
 
@@ -487,10 +525,14 @@ public class MainActivity extends AppCompatActivity {
         
         ImageCaptureManager.getInstance().init(this);
         NetworkClient.getInstance().init(getApplicationContext());
-        
+
         // 初始化提示音管理器
         SoundManager.getInstance().init(getApplicationContext());
-        
+
+        // 初始化 GPS 定位助手
+        LocationHelper.getInstance(getApplicationContext()).init(getApplicationContext());
+        Log.i(TAG, "LocationHelper 已初始化");
+
         // 初始化AgentManager（后台保活功能）
         AgentManager.getInstance().init(getApplicationContext());
     }
@@ -499,7 +541,9 @@ public class MainActivity extends AppCompatActivity {
         String[] permissions = new String[]{
                 Manifest.permission.RECORD_AUDIO,
                 Manifest.permission.CAMERA,
-                Manifest.permission.INTERNET
+                Manifest.permission.INTERNET,
+                Manifest.permission.ACCESS_FINE_LOCATION,
+                Manifest.permission.ACCESS_COARSE_LOCATION
         };
         boolean allGranted = true;
         for (String p : permissions) {

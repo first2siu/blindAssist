@@ -778,3 +778,246 @@ feat: 按住说话提示音功能
 
 **修改文件：**
 - `MainActivity.java` - 在按住说话交互中集成提示音播放
+
+
+### 2026-01-25 修改
+
+feat: 实现导航与避障模块
+
+本次更新实现了完整的导航与避障功能，为视障用户提供智能化出行辅助。
+
+#### 核心变更：
+
+**1. 模型架构优化**
+- 意图分类和指令友好化共用 Qwen2-1.5B-Instruct 模型（GPU 0，节省资源）
+- AutoGLM-9B 扩展导航能力（GPU 2）
+- Qwen2-VL-7B-Instruct 用于障碍物检测（GPU 3）
+
+**2. 导航功能实现**
+- 新增高德地图 API 客户端（`AmapClient`）
+- AutoGLM agent 新增 `Call_Navigation` 动作
+- 新增 `/ws/navigation` WebSocket 端点
+- 实现导航指令"盲人友好化"转换（绝对方向→相对方向，米→步数）
+
+**3. 避障检测服务**
+- FastAPI ObstacleDetection 服务（端口 8004）
+- 实时视频流处理（2fps）
+- TTS 优先级队列（避障 > 导航）
+
+**4. 服务编排与通信**
+- Spring Boot 作为统一协调层
+- 新增 `NavigationWebSocketHandler` 处理导航请求
+- 新增 `TtsMessageQueue` 基于 Redis 的优先级队列
+- 新增 `UnifiedWebSocketConfig` 统一 WebSocket 配置
+
+#### 端口分配：
+
+| 服务 | 端口 |
+|------|------|
+| 意图分类 vLLM | 8001 |
+| AutoGLM vLLM | 8000 |
+| 避障检测 vLLM | 8003 |
+| 意图分类 FastAPI | 8002 |
+| 避障检测 FastAPI | 8004 |
+| AutoGLM FastAPI | 8080 |
+| Spring Boot 服务 | 8090 |
+
+#### 文件变更：
+
+**新增文件（FastAPI/AutoGLM）：**
+- `phone_agent/amap/client.py` - 高德地图客户端
+- `phone_agent/config/prompts_navigation.py` - 导航专用 Prompt
+
+**新增文件（FastAPI/ObstacleDetection）：**
+- `main.py` - 避障检测服务入口
+
+**新增文件（server）：**
+- `ws/NavigationWebSocketHandler.java` - 导航 WebSocket 处理器
+- `ws/NavigationWebSocketConfig.java` - 导航 WebSocket 配置
+- `ws/UnifiedWebSocketConfig.java` - 统一 WebSocket 配置
+- `tts/TtsMessageQueue.java` - TTS 消息队列管理
+- `model/TtsMessage.java` - TTS 消息数据模型
+- `model/TtsPriority.java` - TTS 优先级枚举
+- `api/TtsController.java` - TTS 控制器
+
+**修改文件：**
+- `server/src/main/java/com/blindassist/server/service/NavigationService.java` - 导航服务增强
+- `server/src/main/resources/application.properties` - 配置更新
+
+**脚本更新：**
+- `scripts/start_all_services.sh` - 统一服务启动脚本
+- `scripts/download_all_models.py` - 模型下载配置
+
+#### 需求文档：
+
+完整的需求与架构文档见：`REQUIREMENTS_VISION_NAV.md`
+
+
+### 2026-01-28 修改
+
+feat: 统一TTS消息队列管理，解决导航指令被避障警告打断丢失问题
+
+本次更新重构了TTS消息播报架构，将所有语音播报统一纳入Redis优先级队列管理，解决了避障警告打断导航时导致导航指令丢失的问题。
+
+#### 问题背景：
+
+原架构中，Android客户端直接连接避障FastAPI服务，当检测到障碍物时会立即播报警告，打断当前的导航指令播报。被打断的导航指令无法恢复，用户可能错过关键的转向提示。
+
+#### 解决方案：
+
+实现了服务端统一的TTS消息队列管理系统，包含以下核心组件：
+
+**1. Redis优先级队列 (`TtsMessageQueue`)**
+- 使用Redis Sorted Set实现优先级队列
+- 四级优先级：CRITICAL（紧急避障）> HIGH（恢复消息）> NORMAL（导航）> LOW
+- 支持消息持久化和批量出队
+
+**2. 消息打断与恢复机制**
+- `saveInterrupted(String userId, TtsMessage)`：保存被打断的消息
+- `getInterrupted(String userId)`：获取被打断的消息
+- `restoreInterrupted(String userId)`：将被打断的消息重新入队（优先级提升）
+- 确保高优先级消息（避障警告）打断后，被中断的指令能恢复播放
+
+**3. 避障消息转发 (`ObstacleWebSocketHandler`)**
+- 接收FastAPI避障服务的检测结果
+- 根据紧急程度（urgency）映射到TTS优先级
+- 转发到Redis队列而非直接播报
+- 支持的紧急程度：critical → CRITICAL，high → HIGH，medium → NORMAL，low → LOW
+
+**4. TTS控制API (`TtsController`)**
+- `POST /api/tts/interrupt`：保存当前正在播报的消息
+- `POST /api/tts/resume`：恢复被打断的消息
+- `GET /api/tts/queue`：查看当前队列状态
+- `DELETE /api/tts/queue`：清空队列
+
+#### 数据流变更：
+
+**原架构：**
+```
+Android → FastAPI避障服务 → 直接TTS播报（打断导航）
+```
+
+**新架构：**
+```
+Android → Spring Boot ObstacleWebSocketHandler → Redis TTS队列 → Android轮询获取
+                                      ↓
+                            保存被打断的导航指令 → 恢复时优先播放
+```
+
+#### Android客户端变更：
+
+- `BackgroundCameraService.java`：
+  - 移除直接 `speakImmediately()` 调用
+  - 改为连接到Spring Boot (`ws://10.181.78.161:8090/ws/obstacle`)
+
+- `ObstacleDetectionClient.java`：
+  - 新增 `connect(String url)` 方法支持动态URL配置
+  - 新增 `register()` 方法用于用户注册
+  - 回调中移除直接TTS播放逻辑
+
+#### Spring Boot服务端变更：
+
+**新增文件：**
+- `model/TtsMessage.java` - TTS消息实体（含优先级、时间戳、来源）
+- `model/TtsPriority.java` - TTS优先级枚举（CRITICAL/HIGH/NORMAL/LOW）
+
+**修改文件：**
+- `ws/ObstacleWebSocketHandler.java` - 完全重写，转发到Redis队列
+- `tts/TtsMessageQueue.java` - 添加打断/恢复方法
+- `api/TtsController.java` - 添加打断控制端点
+- `service/AgentService.java` - 修复硬编码WebSocket URL，使用配置文件
+
+#### 配置文件更新：
+
+`application.properties`：
+```properties
+# WebSocket配置统一使用横线命名
+fastapi.websocket-base-url=ws://10.184.17.161:8080/ws/agent/
+fastapi.websocket-navigation-base-url=ws://10.184.17.161:8080/ws/navigation/
+```
+
+#### 技术规格：
+
+| 参数 | 值 |
+|------|-----|
+| 队列数据结构 | Redis Sorted Set |
+| Score计算 | 优先级值 × 1,000,000,000 + 时间戳 |
+| 默认批次大小 | 10条消息 |
+| 恢复消息优先级 | 原优先级提升至HIGH（CRITICAL除外） |
+
+#### 用户体验改进：
+
+- 避障警告立即播报（CRITICAL优先级）
+- 被打断的导航指令自动保存
+- 避障警告结束后，导航指令恢复播放（提升至HIGH优先级）
+- 所有TTS消息统一管理，不会丢失
+
+#### 文件变更清单：
+
+**Android客户端：**
+- `app/src/main/java/com/example/test_android_dev/service/BackgroundCameraService.java`
+- `app/src/main/java/com/example/test_android_dev/navigation/ObstacleDetectionClient.java`
+
+**Spring Boot服务端（需同步到远程服务器）：**
+- `server/src/main/java/com/blindassist/server/ws/ObstacleWebSocketHandler.java`
+- `server/src/main/java/com/blindassist/server/tts/TtsMessageQueue.java`
+- `server/src/main/java/com/blindassist/server/api/TtsController.java`
+- `server/src/main/java/com/blindassist/server/service/AgentService.java`
+- `server/src/main/java/com/blindassist/server/config/FastApiProperties.java`
+- `server/src/main/resources/application.properties`
+
+**FastAPI服务端（需同步到远程服务器）：**
+- `FastAPI/AutoGLM/server.py` - 添加NavigationSession类，实现GPS跟踪和偏航检测
+
+
+### 2026-01-28 修改（追加）
+
+fix: 修复导航超时、WebSocket连接重复和任务切换问题
+
+本次更新修复了导航功能卡住、WebSocket连接管理混乱、任务切换时状态不一致等关键问题。
+
+#### 修复的问题：
+
+**1. 导航初始化超时/卡住**
+- **问题**：导航请求发送后模型输出思考过程但卡住，最终连接关闭，没有返回结果给用户
+- **原因**：导航工具执行循环缺少异常处理，当模型响应格式不符合预期时无法优雅降级
+- **解决**：在工具执行循环外层添加 try-except 异常捕获，失败时返回友好的错误提示
+
+**2. WebSocket 重复连接导致状态混乱**
+- **问题**：日志显示同一客户端有多个连接同时存在，模型输出整个历史对话被重复执行
+- **原因**：新连接建立时没有清理旧连接，导致多个会话共存
+- **解决**：在 `ConnectionManager.connect()` 中检测重复连接，主动关闭旧连接并清理会话状态
+
+**3. Android 端任务切换时的竞态条件**
+- **问题**：快速切换任务时，旧 WebSocket 未完全断开就建立新连接
+- **原因**：`stopTask()` 调用 `disconnect()` 是异步的，新任务启动时旧连接可能仍在关闭过程中
+- **解决**：在 `connectWebSocket()` 中检查当前连接状态，如已连接则先断开并等待200ms
+
+#### 技术规格：
+
+| 参数 | 值 |
+|------|-----|
+| 导航工具循环最大迭代次数 | 10次 |
+| 任务切换等待时间 | 500ms + 200ms |
+| 重复连接检测 | 基于 client_id |
+
+#### 文件变更清单：
+
+**FastAPI服务端：**
+- `FastAPI/AutoGLM/server.py`
+  - `ConnectionManager.connect()` - 添加重复连接检测和清理
+  - 导航工具执行循环 - 添加 try-except 异常处理
+
+**Android客户端：**
+- `app/src/main/java/com/example/test_android_dev/manager/AgentManager.java`
+  - `connectWebSocket()` - 添加连接状态检查，防止重复连接
+
+**Spring Boot服务端：**
+- `server/src/main/java/com/blindassist/server/service/NavigationAgentService.java`
+  - 添加高德 API Key 传递给 FastAPI
+
+#### 其他改进：
+
+- **高德 API Key 统一配置**：从 Spring Boot 配置文件读取并通过 WebSocket 传递给 FastAPI，无需在服务端设置环境变量
+- **UTF-8 编码修复**：添加 logback-spring.xml 配置文件，解决控制台中文乱码问题
+- **GPS 定位异常处理**：LocationHelper 添加完整的异常捕获，防止初始化时应用崩溃

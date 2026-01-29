@@ -1,5 +1,7 @@
 package com.blindassist.server.ws;
 
+import com.blindassist.server.model.TtsPriority;
+import com.blindassist.server.tts.TtsMessageQueue;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
@@ -10,26 +12,30 @@ import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
-import java.io.IOException;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 避障WebSocket Handler
- * 接收Android端的摄像头帧，转发给FastAPI避障服务
+ * 接收来自FastAPI避障服务的检测结果，转发到Redis TTS队列
+ *
+ * 数据流:
+ * FastAPI避障服务 → Spring Boot ObstacleWebSocketHandler → Redis TTS队列 → Android客户端
  */
 @Component
 public class ObstacleWebSocketHandler extends TextWebSocketHandler {
 
     private static final Logger logger = LoggerFactory.getLogger(ObstacleWebSocketHandler.class);
 
-    // 存储用户Session到WebSocket的映射
+    private final ObjectMapper objectMapper;
+    private final TtsMessageQueue ttsQueue;
+
+    // 存储用户ID到Session的映射
     private final Map<String, WebSocketSession> userSessions = new ConcurrentHashMap<>();
 
-    private final ObjectMapper objectMapper;
-
-    public ObstacleWebSocketHandler() {
+    public ObstacleWebSocketHandler(TtsMessageQueue ttsQueue) {
         this.objectMapper = new ObjectMapper();
+        this.ttsQueue = ttsQueue;
     }
 
     @Override
@@ -42,29 +48,22 @@ public class ObstacleWebSocketHandler extends TextWebSocketHandler {
     protected void handleTextMessage(WebSocketSession session, TextMessage message) throws Exception {
         try {
             JsonNode root = objectMapper.readTree(message.getPayload());
-            String type = root.path("type").asText();
+            String msgType = root.path("type").asText();
             String userId = root.path("user_id").asText();
 
-            // 注册用户Session
-            if (userId != null && !userId.isEmpty()) {
+            // 注册用户
+            if ("register".equals(msgType) && userId != null && !userId.isEmpty()) {
                 userSessions.put(userId, session);
+                logger.info("User registered for obstacle detection: {}", userId);
+                return;
             }
 
-            if ("register".equals(type)) {
-                // 用户注册
-                logger.info("User registered for obstacle detection: {}", userId);
-
-            } else if ("frame".equals(type)) {
-                // 接收视频帧
-                String frameData = root.path("frame_data").asText();
-                JsonNode sensorData = root.path("sensor_data");
-
-                // TODO: 转发到FastAPI避障服务进行处理
-                // 当前为示例实现
-                handleObstacleFrame(userId, frameData, sensorData);
-
-            } else if ("keep_alive".equals(type)) {
-                // 心跳保活
+            // 处理避障检测结果
+            if ("obstacle".equals(msgType)) {
+                handleObstacleDetection(root, userId);
+            }
+            // 处理心跳
+            else if ("keep_alive".equals(msgType)) {
                 session.sendMessage(new TextMessage("{\"status\":\"alive\"}"));
             }
 
@@ -76,44 +75,91 @@ public class ObstacleWebSocketHandler extends TextWebSocketHandler {
     @Override
     public void handleTransportError(WebSocketSession session, Throwable exception) throws Exception {
         logger.error("Obstacle WebSocket transport error", exception);
-        // 移除失效的Session
-        userSessions.values().removeIf(s -> s.equals(session));
+        cleanupSession(session);
     }
 
     @Override
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) throws Exception {
         logger.info("Obstacle WebSocket closed: {}, status: {}", session.getId(), status);
-        // 移除关闭的Session
-        userSessions.values().removeIf(s -> s.equals(session));
+        cleanupSession(session);
     }
 
     /**
-     * 处理避障帧
-     * TODO: 实际实现需要转发到FastAPI避障服务
+     * 处理避障检测结果，转发到TTS队列
+     *
+     * 预期消息格式:
+     * {
+     *   "type": "obstacle",
+     *   "user_id": "user123",
+     *   "warning": "前方三米有台阶，请减速",
+     *   "urgency": "high",  // critical/high/medium/low
+     *   "obstacle": {
+     *     "type": "台阶",
+     *     "position": "前方",
+     *     "distance": 3.0,
+     *     "instruction": "前方三米有台阶，请减速并注意脚下"
+     *   }
+     * }
      */
-    private void handleObstacleFrame(String userId, String frameData, JsonNode sensorData) {
-        // 示例：每处理10帧返回一条假指令
-        // 实际实现中，这里应该转发到FastAPI避障服务
+    private void handleObstacleDetection(JsonNode root, String userId) {
+        if (userId == null || userId.isEmpty()) {
+            logger.warn("Missing user_id in obstacle detection message");
+            return;
+        }
 
-        logger.debug("Received frame from user {}, size: {} bytes", userId, frameData != null ? frameData.length() : 0);
+        String warning = root.path("warning").asText();
+        String urgency = root.path("urgency").asText("medium");
+        JsonNode obstacle = root.path("obstacle");
 
-        // 暂时不做处理，等待FastAPI服务实现
+        // 解析语音指令
+        String ttsContent = warning;
+        if (obstacle != null && obstacle.has("instruction")) {
+            ttsContent = obstacle.path("instruction").asText();
+        }
+
+        // 根据紧急程度确定优先级
+        TtsPriority priority = mapUrgencyToPriority(urgency);
+
+        // 加入TTS队列
+        ttsQueue.enqueue(userId, ttsContent, priority, "obstacle");
+
+        logger.info("Enqueued obstacle warning for user {}: priority={}, content={}",
+                    userId, priority, ttsContent);
     }
 
     /**
-     * 向用户发送避障警告
+     * 将紧急程度映射到TTS优先级
      */
-    public void sendObstacleWarning(String userId, String warning, String urgency) {
+    private TtsPriority mapUrgencyToPriority(String urgency) {
+        if (urgency == null) {
+            return TtsPriority.NORMAL;
+        }
+        return switch (urgency.toLowerCase()) {
+            case "critical" -> TtsPriority.CRITICAL;
+            case "high" -> TtsPriority.HIGH;
+            case "medium" -> TtsPriority.NORMAL;
+            case "low" -> TtsPriority.LOW;
+            default -> TtsPriority.NORMAL;
+        };
+    }
+
+    /**
+     * 清理Session
+     */
+    private void cleanupSession(WebSocketSession session) {
+        userSessions.entrySet().removeIf(entry -> entry.getValue().equals(session));
+    }
+
+    /**
+     * 向指定用户发送消息
+     */
+    public void sendMessageToUser(String userId, String message) {
         WebSocketSession session = userSessions.get(userId);
         if (session != null && session.isOpen()) {
             try {
-                String message = String.format(
-                    "{\"type\":\"obstacle\",\"warning\":\"%s\",\"urgency\":\"%s\"}",
-                    warning, urgency
-                );
                 session.sendMessage(new TextMessage(message));
-            } catch (IOException e) {
-                logger.error("Failed to send obstacle warning to user {}", userId, e);
+            } catch (Exception e) {
+                logger.error("Failed to send message to user {}", userId, e);
             }
         }
     }
