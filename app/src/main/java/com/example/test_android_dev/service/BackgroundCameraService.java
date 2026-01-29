@@ -29,8 +29,10 @@ import java.util.concurrent.ScheduledExecutorService;
  * 后台摄像头服务
  * 用于避障功能的静默图像采集
  *
- * 架构更新：避障检测结果通过 Spring Boot 转发到 Redis TTS 队列
- * 不再直接调用 TTS 播报，避免打断导航指令丢失
+ * 架构：
+ * Android → FastAPI ObstacleDetection (8004/ws) → 检测障碍物
+ *         → Spring Boot ObstacleWebSocketHandler (/ws/obstacle) → Redis TTS 队列
+ *         → Android TTS 播报
  */
 public class BackgroundCameraService extends Service {
     private static final String TAG = "BackgroundCameraService";
@@ -38,8 +40,8 @@ public class BackgroundCameraService extends Service {
     private static final int NOTIFICATION_ID = 2002;
     private static final long FRAME_INTERVAL_MS = 500; // 2fps
 
-    // 连接到 Spring Boot 的 ObstacleWebSocketHandler
-    private static final String SPRING_BOOT_WS_URL = "ws://10.181.78.161:8090/ws/obstacle";
+    // 连接到 FastAPI 避障服务（不是 Spring Boot）
+    private static final String FASTAPI_OBSTACLE_URL = "ws://10.184.17.161:8004/ws";
 
     private static boolean isRunning = false;
 
@@ -65,18 +67,18 @@ public class BackgroundCameraService extends Service {
         createNotificationChannel();
         startForeground(NOTIFICATION_ID, createNotification("避障模式准备中..."));
 
-        // 设置回调 - 仅用于连接状态通知，不再直接播报
+        // 设置回调 - 处理避障检测结果
         obstacleClient.setCallback(new ObstacleDetectionClient.ObstacleCallback() {
             @Override
             public void onObstacleDetected(String warning, String urgency) {
                 Log.i(TAG, "Obstacle detected: " + warning + ", urgency: " + urgency);
-                // 不再直接播报，避障消息已通过 Spring Boot 加入 Redis 队列
-                // Android 客户端会通过轮询 TTS 队列获取并播报
+                // 直接播报障碍物警告（使用 VoiceManager）
+                com.example.test_android_dev.VoiceManager.getInstance().speakImmediate(warning);
             }
 
             @Override
             public void onConnected() {
-                Log.d(TAG, "Obstacle client connected to Spring Boot");
+                Log.d(TAG, "Obstacle client connected to FastAPI");
                 // 注册用户
                 obstacleClient.register();
                 updateNotification("避障模式运行中");
@@ -138,8 +140,8 @@ public class BackgroundCameraService extends Service {
         isRunning = true;
         isCapturing = true;
 
-        // 连接到 Spring Boot 避障 WebSocket 服务
-        obstacleClient.connect(SPRING_BOOT_WS_URL);
+        // 连接到 FastAPI 避障 WebSocket 服务
+        obstacleClient.connect(FASTAPI_OBSTACLE_URL);
 
         // 启动相机
         startCamera();

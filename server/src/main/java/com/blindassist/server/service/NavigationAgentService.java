@@ -36,8 +36,8 @@ public class NavigationAgentService {
     private final Map<String, WebSocketSession> appSessions = new ConcurrentHashMap<>();
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    // 导航 WebSocket 基础地址 (从配置文件读取)
-    @Value("${fastapi.websocket-navigation-base-url:ws://10.184.17.161:8080/ws/navigation/}")
+    // 导航 WebSocket 基础地址 (从配置文件读取，连接到新的 NavigationAgent 服务)
+    @Value("${fastapi.websocket-navigation-base-url:ws://10.184.17.161:8081/ws/navigation/}")
     private String navigationServerBaseUri;
 
     // 高德地图 API Key (从配置文件读取)
@@ -100,6 +100,11 @@ public class NavigationAgentService {
             String payload = objectMapper.writeValueAsString(initPayload);
             log.info("[NavigationAgentService] 发送导航 init 消息: {}", payload);
             navClient.send(payload);
+
+            // 5. 通知 Android 启动障碍物检测
+            String obstacleStartMsg = "{\"status\":\"success\",\"type\":\"start_obstacle_detection\",\"message\":\"导航已开始，正在启动避障服务\",\"obstacle_url\":\"ws://10.184.17.161:8004/ws\"}";
+            sendMessageToApp(appSession, obstacleStartMsg);
+            log.info("[NavigationAgentService] 已发送障碍物检测启动通知");
 
         } catch (Exception e) {
             long elapsed = System.currentTimeMillis() - startTime;

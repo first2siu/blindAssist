@@ -87,6 +87,11 @@ CONFIG = {
             "port": 8004,
             "vllm_url": "http://localhost:8003/v1",
         },
+        "navigation_agent": {
+            "script": "/data/lilele/NavigationAgent/main.py",
+            "port": 8081,
+            "vllm_url": "http://localhost:8001/v1",  # 使用与 IntentClassifier 相同的模型
+        },
         "autoglm": {
             "script": "/data/lilele/AutoGLM/server.py",
             "port": 8080,

@@ -12,6 +12,7 @@ import com.example.test_android_dev.model.LocationInfo;
 import com.example.test_android_dev.model.TaskState;
 import com.example.test_android_dev.service.AutoGLMService;
 import com.example.test_android_dev.service.BackgroundKeepAliveService;
+import com.example.test_android_dev.VoiceManager;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
@@ -34,6 +35,7 @@ public class AgentManager {
 
     private TaskState currentTask;
     private boolean isTaskRunning = false;
+    private boolean isNavigating = false;  // 是否正在导航
     private int screenWidth;
     private int screenHeight;
     private Context appContext;
@@ -41,6 +43,12 @@ public class AgentManager {
     // 服务连接重试计数器
     private int serviceRetryCount = 0;
     private static final int MAX_SERVICE_RETRY = 10;
+
+    // 导航位置更新相关
+    private static final long LOCATION_UPDATE_INTERVAL_MS = 5000;  // 5秒更新一次位置
+    private static final float MIN_DISTANCE_UPDATE_METERS = 10.0f;  // 最小更新距离10米
+    private Runnable locationUpdateRunnable;
+    private LocationInfo lastLocationInfo;
 
     private AgentManager() {
         connectionManager = WebSocketConnectionManager.getInstance();
@@ -124,6 +132,8 @@ public class AgentManager {
         isTaskRunning = false;
         connectionManager.disconnect();
         wakeLockManager.release();
+        stopNavigation();  // 停止导航（包括位置更新和避障）
+        stopObstacleDetection();  // 停止障碍物检测
 
         if (currentTask != null) {
             taskStateManager.markTaskStopped(currentTask);
@@ -305,6 +315,13 @@ public class AgentManager {
                     msg = response.get("message").getAsString();
                 }
                 Log.i(TAG, "收到服务器停止指令: " + msg);
+
+                // 如果包含 stop_obstacle_detection 类型，停止障碍物检测
+                String type = response.has("type") ? response.get("type").getAsString() : "";
+                if ("stop_obstacle_detection".equals(type)) {
+                    stopObstacleDetection();
+                }
+
                 showToast(msg);
                 stopTask();
                 return;
@@ -320,6 +337,39 @@ public class AgentManager {
                 showToast(errorMsg);
                 // 可选：是否要在错误时停止任务
                 // stopTask();
+                return;
+            }
+
+            // 处理障碍物检测启动指令（在导航开始时自动启动避障服务）
+            if (response.has("type") && "start_obstacle_detection".equals(response.get("type").getAsString())) {
+                String obstacleUrl = response.has("obstacle_url") ? response.get("obstacle_url").getAsString() : "ws://10.184.17.161:8004/ws";
+                Log.i(TAG, "收到障碍物检测启动指令: " + obstacleUrl);
+                startObstacleDetection(obstacleUrl);
+
+                String message = response.has("message") ? response.get("message").getAsString() : "避障服务已启动";
+                VoiceManager.getInstance().speakImmediate(message);
+                return;
+            }
+
+            // 处理导航指令（来自 NavigationAgent 服务）
+            if (response.has("instruction")) {
+                String instruction = response.get("instruction").getAsString();
+                String type = response.has("type") ? response.get("type").getAsString() : "";
+                Log.i(TAG, "收到导航指令: " + instruction + ", 类型: " + type);
+                VoiceManager.getInstance().speakImmediate(instruction);
+
+                // 首次收到导航指令时，启动位置更新
+                if (!isNavigating) {
+                    isNavigating = true;
+                    startLocationUpdates();
+                    Log.i(TAG, "导航开始，启动位置更新");
+                }
+
+                // 如果是到达目的地，停止导航
+                if ("arrived".equals(type)) {
+                    showToast("已到达目的地");
+                    stopNavigation();  // 停止导航和位置更新
+                }
                 return;
             }
 
@@ -463,5 +513,165 @@ public class AgentManager {
     private void showToast(String msg) {
         mainHandler.post(() -> android.widget.Toast.makeText(
             App.getContext(), msg, android.widget.Toast.LENGTH_SHORT).show());
+    }
+
+    // ==================== 障碍物检测管理 ====================
+
+    private boolean isObstacleDetectionRunning = false;
+
+    /**
+     * 启动障碍物检测（使用 BackgroundCameraService）
+     */
+    private void startObstacleDetection(String wsUrl) {
+        if (isObstacleDetectionRunning) {
+            Log.d(TAG, "障碍物检测已在运行");
+            return;
+        }
+
+        Log.d(TAG, "启动障碍物检测服务: " + wsUrl);
+        isObstacleDetectionRunning = true;
+
+        // 启动后台摄像头服务（包含摄像头采集和帧发送）
+        com.example.test_android_dev.service.BackgroundCameraService.start(appContext);
+    }
+
+    /**
+     * 停止障碍物检测
+     */
+    private void stopObstacleDetection() {
+        if (!isObstacleDetectionRunning) {
+            return;
+        }
+
+        Log.d(TAG, "停止障碍物检测服务");
+        isObstacleDetectionRunning = false;
+        com.example.test_android_dev.service.BackgroundCameraService.stop(appContext);
+    }
+
+    // ==================== 导航位置更新管理 ====================
+
+    /**
+     * 停止导航（包括位置更新和避障）
+     */
+    private void stopNavigation() {
+        if (!isNavigating) {
+            return;
+        }
+
+        Log.d(TAG, "停止导航和位置更新");
+        isNavigating = false;
+        stopLocationUpdates();
+        stopObstacleDetection();
+    }
+
+    /**
+     * 启动定期位置更新
+     */
+    private void startLocationUpdates() {
+        if (locationUpdateRunnable != null) {
+            mainHandler.removeCallbacks(locationUpdateRunnable);
+        }
+
+        locationUpdateRunnable = new Runnable() {
+            @Override
+            public void run() {
+                if (isNavigating && isTaskRunning) {
+                    sendLocationUpdate();
+                    mainHandler.postDelayed(this, LOCATION_UPDATE_INTERVAL_MS);
+                }
+            }
+        };
+
+        // 立即发送第一次，然后定期发送
+        sendLocationUpdate();
+        mainHandler.postDelayed(locationUpdateRunnable, LOCATION_UPDATE_INTERVAL_MS);
+        Log.i(TAG, "位置更新已启动，间隔: " + LOCATION_UPDATE_INTERVAL_MS + "ms");
+    }
+
+    /**
+     * 停止位置更新
+     */
+    private void stopLocationUpdates() {
+        if (locationUpdateRunnable != null) {
+            mainHandler.removeCallbacks(locationUpdateRunnable);
+            locationUpdateRunnable = null;
+        }
+        lastLocationInfo = null;
+        Log.i(TAG, "位置更新已停止");
+    }
+
+    /**
+     * 发送位置更新到服务器
+     */
+    private void sendLocationUpdate() {
+        LocationHelper locationHelper = LocationHelper.getInstance();
+        LocationInfo currentLocation = locationHelper.getCachedLocation();
+
+        if (currentLocation == null) {
+            // 请求新的位置
+            locationHelper.getCurrentLocation(location -> {
+                if (location != null && isNavigating) {
+                    sendLocationUpdateIfNeeded(location);
+                }
+            });
+            return;
+        }
+
+        sendLocationUpdateIfNeeded(currentLocation);
+    }
+
+    /**
+     * 检查是否需要发送位置更新（基于距离变化）
+     */
+    private void sendLocationUpdateIfNeeded(LocationInfo newLocation) {
+        // 检查距离是否足够大
+        if (lastLocationInfo != null) {
+            float distance = calculateDistance(
+                lastLocationInfo.getLatitude(), lastLocationInfo.getLongitude(),
+                newLocation.getLatitude(), newLocation.getLongitude()
+            );
+            if (distance < MIN_DISTANCE_UPDATE_METERS) {
+                Log.d(TAG, "位置变化不足，跳过更新: " + distance + "米");
+                return;
+            }
+        }
+
+        lastLocationInfo = newLocation;
+
+        // 发送位置更新消息
+        JsonObject json = new JsonObject();
+        json.addProperty("type", "location_update");
+
+        JsonObject locationJson = new JsonObject();
+        locationJson.addProperty("latitude", newLocation.getLatitude());
+        locationJson.addProperty("longitude", newLocation.getLongitude());
+        if (newLocation.getAltitude() != null) {
+            locationJson.addProperty("altitude", newLocation.getAltitude());
+        }
+        if (newLocation.getHeading() != null) {
+            locationJson.addProperty("heading", newLocation.getHeading());
+        }
+        if (newLocation.getAccuracy() != null) {
+            locationJson.addProperty("accuracy", newLocation.getAccuracy());
+        }
+        locationJson.addProperty("timestamp", newLocation.getTimestamp() != null ? newLocation.getTimestamp() : System.currentTimeMillis());
+        json.add("location", locationJson);
+
+        boolean sent = connectionManager.send(gson.toJson(json));
+        Log.d(TAG, "发送位置更新: " + (sent ? "成功" : "失败") + ", 位置: " + newLocation.getLatitude() + "," + newLocation.getLongitude());
+    }
+
+    /**
+     * 计算两点之间的距离（米）
+     */
+    private float calculateDistance(double lat1, double lon1, double lat2, double lon2) {
+        final float R = 6371000; // 地球半径，单位：米
+        double dLat = Math.toRadians(lat2 - lat1);
+        double dLon = Math.toRadians(lon2 - lon1);
+        double a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                   Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) *
+                   Math.sin(dLon / 2) * Math.sin(dLon / 2);
+        double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        return (float) (R * c);
     }
 }

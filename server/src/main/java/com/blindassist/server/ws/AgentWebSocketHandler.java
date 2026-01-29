@@ -129,6 +129,9 @@ public class AgentWebSocketHandler extends TextWebSocketHandler {
             } else if ("step".equals(msg.getType())) {
                 // step 消息继续走 AutoGLM（只有手机操控才有 step）
                 agentService.processStep(sessionId, msg.getScreenshot(), msg.getScreenInfo());
+            } else if ("location_update".equals(msg.getType())) {
+                // 位置更新消息（导航中使用）
+                handleLocationUpdateRequest(session, sessionId, msg);
             } else {
                 logger.warn("未知消息类型: {}", msg.getType());
             }
@@ -216,7 +219,8 @@ public class AgentWebSocketHandler extends TextWebSocketHandler {
             if ("NAVIGATION".equals(sessionType)) {
                 // 停止导航任务
                 navigationAgentService.cancelNavigation(sessionId);
-                session.sendMessage(new TextMessage("{\"status\":\"stopped\",\"message\":\"导航已停止\"}"));
+                // 发送停止障碍物检测消息
+                session.sendMessage(new TextMessage("{\"status\":\"stopped\",\"type\":\"stop_obstacle_detection\",\"message\":\"导航已停止\"}"));
             } else if ("OBSTACLE".equals(sessionType)) {
                 // 停止避障任务
                 navigationAgentService.cleanup(sessionId);
@@ -292,6 +296,42 @@ public class AgentWebSocketHandler extends TextWebSocketHandler {
         } catch (Exception e) {
             logger.error("处理避障请求失败", e);
             session.sendMessage(new TextMessage("{\"status\":\"error\",\"message\":\"避障处理失败: " + e.getMessage() + "\"}"));
+        }
+    }
+
+    /**
+     * 处理位置更新请求（导航中使用）
+     * 将 Android 的位置更新转发给 NavigationAgent 服务
+     */
+    private void handleLocationUpdateRequest(WebSocketSession session, String sessionId, AgentMessage msg) throws IOException {
+        try {
+            // 检查是否是导航会话
+            String sessionType = sessionTypes.get(sessionId);
+            if (!"NAVIGATION".equals(sessionType)) {
+                logger.warn("位置更新仅对导航会话有效，当前类型: {}", sessionType);
+                return;
+            }
+
+            // 从消息中获取 GPS 位置
+            Map<String, Object> origin;
+            SensorData sensorData = new SensorData();
+
+            if (msg.getLocation() != null) {
+                origin = Map.of(
+                    "lon", msg.getLocation().getLongitude(),
+                    "lat", msg.getLocation().getLatitude()
+                );
+                sensorData.setHeading(msg.getLocation().getHeading() != null ? msg.getLocation().getHeading() : 0.0f);
+                sensorData.setAccuracy(msg.getLocation().getAccuracy() != null ? msg.getLocation().getAccuracy() : 10.0f);
+
+                // 转发位置更新到 NavigationAgent 服务
+                navigationAgentService.updateLocation(sessionId, origin, sensorData);
+            } else {
+                logger.warn("位置更新消息缺少位置信息");
+            }
+
+        } catch (Exception e) {
+            logger.error("处理位置更新失败", e);
         }
     }
 

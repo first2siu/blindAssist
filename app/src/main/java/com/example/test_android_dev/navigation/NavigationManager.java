@@ -24,7 +24,7 @@ import okhttp3.WebSocketListener;
  */
 public class NavigationManager {
     private static final String TAG = "NavigationManager";
-    private static final String NAV_WS_URL = "ws://your-backend-api.com/ws/navigation/";
+    private static final String NAV_WS_URL = "ws://10.184.17.161:8081/ws/navigation/";
 
     private static NavigationManager instance;
 
@@ -147,18 +147,36 @@ public class NavigationManager {
 
             navigationWebSocket = httpClient.newWebSocket(request, new NavigationWebSocketListener());
 
-            // 发送开始导航消息
+            // 发送初始化导航消息 - 格式需与 NavigationAgent 服务匹配
             JSONObject startMessage = new JSONObject();
-            startMessage.put("type", "start");
-            startMessage.put("user_id", userId);
-            startMessage.put("destination", destination);
+            startMessage.put("type", "init");
+            startMessage.put("user_task", destination);
+            // 可选：添加高德API Key
+            startMessage.put("amap_api_key", "fed91a0ffe7891336b2398249a2faf53");
 
             SensorCollector.SensorData sensorData = sensorCollector.getCurrentData();
             if (sensorData.isValid()) {
+                // origin 字段包含经纬度
+                JSONObject originJson = new JSONObject();
+                originJson.put("lon", sensorData.longitude);
+                originJson.put("lat", sensorData.latitude);
+                startMessage.put("origin", originJson);
+
+                // sensor_data 字段包含朝向和精度
                 JSONObject sensorJson = new JSONObject();
-                sensorJson.put("latitude", sensorData.latitude);
-                sensorJson.put("longitude", sensorData.longitude);
                 sensorJson.put("heading", sensorData.heading);
+                sensorJson.put("accuracy", sensorData.accuracy);
+                startMessage.put("sensor_data", sensorJson);
+            } else {
+                // 如果GPS数据无效，使用默认值
+                JSONObject originJson = new JSONObject();
+                originJson.put("lon", 0.0);
+                originJson.put("lat", 0.0);
+                startMessage.put("origin", originJson);
+
+                JSONObject sensorJson = new JSONObject();
+                sensorJson.put("heading", 0.0);
+                sensorJson.put("accuracy", 0.0);
                 startMessage.put("sensor_data", sensorJson);
             }
 
@@ -181,16 +199,20 @@ public class NavigationManager {
         }
 
         try {
+            // 格式需与 NavigationAgent 服务的 location_update 匹配
             JSONObject message = new JSONObject();
-            message.put("type", "update");
-            message.put("user_id", userId);
+            message.put("type", "location_update");
 
+            // origin 字段包含经纬度
+            JSONObject originJson = new JSONObject();
+            originJson.put("lon", sensorData.longitude);
+            originJson.put("lat", sensorData.latitude);
+            message.put("origin", originJson);
+
+            // sensor_data 字段包含朝向和精度
             JSONObject sensorJson = new JSONObject();
-            sensorJson.put("latitude", sensorData.latitude);
-            sensorJson.put("longitude", sensorData.longitude);
             sensorJson.put("heading", sensorData.heading);
             sensorJson.put("accuracy", sensorData.accuracy);
-
             message.put("sensor_data", sensorJson);
 
             navigationWebSocket.send(message.toString());
@@ -215,17 +237,35 @@ public class NavigationManager {
 
             try {
                 JSONObject message = new JSONObject(text);
+                String status = message.optString("status");
                 String type = message.optString("type");
 
-                if ("instruction".equals(type)) {
-                    String instruction = message.optString("instruction", "");
-                    if (callback != null) {
-                        callback.onInstructionReceived(instruction);
-                    }
-                } else if ("error".equals(type)) {
+                // 处理错误状态
+                if ("error".equals(status)) {
                     String error = message.optString("message", "未知错误");
                     if (callback != null) {
                         callback.onError(error);
+                    }
+                    return;
+                }
+
+                // 处理不同类型的成功响应
+                if ("route_planned".equals(type) || "navigation_update".equals(type)) {
+                    String instruction = message.optString("instruction", "");
+                    if (!instruction.isEmpty() && callback != null) {
+                        callback.onInstructionReceived(instruction);
+                    }
+                } else if ("arrived".equals(type)) {
+                    String instruction = message.optString("instruction", "已到达目的地");
+                    if (callback != null) {
+                        callback.onInstructionReceived(instruction);
+                        // 到达后自动停止导航
+                        stopNavigation();
+                    }
+                } else if ("off_route".equals(type)) {
+                    String instruction = message.optString("instruction", "您偏离了路线");
+                    if (callback != null) {
+                        callback.onError(instruction);
                     }
                 }
 
