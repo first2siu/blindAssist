@@ -43,4 +43,33 @@ public class Config {
      * 在讯飞开放平台应用管理中获取
      */
     public static final String XUNFEI_API_SECRET = "";
+
+    // ==================== 服务器地址配置 ====================
+
+    /**
+     * Spring Boot 服务器地址
+     * 用于 TTS 队列轮询和其他 REST API
+     */
+    public static final String SPRING_BOOT_BASE_URL = "http://10.181.78.161:8090";
+
+    /**
+     * TTS 轮询 API 端点
+     */
+    public static final String TTS_PULL_URL = SPRING_BOOT_BASE_URL + "/api/tts/pull";
+
+    /**
+     * TTS 恢复打断消息 API 端点
+     */
+    public static final String TTS_RESUME_URL = SPRING_BOOT_BASE_URL + "/api/tts/resume";
+
+    /**
+     * TTS 保存打断消息 API 端点
+     */
+    public static final String TTS_INTERRUPT_URL = SPRING_BOOT_BASE_URL + "/api/tts/interrupt";
+
+    /**
+     * 用户 ID（用于 TTS 队列识别）
+     * 生产环境应使用唯一设备标识或登录用户 ID
+     */
+    public static final String USER_ID = "android_user_default";
 }

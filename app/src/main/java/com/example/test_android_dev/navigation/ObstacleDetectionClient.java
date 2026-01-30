@@ -90,7 +90,8 @@ public class ObstacleDetectionClient {
         }
 
         this.wsUrl = url;
-        Log.d(TAG, "Connecting to obstacle detection service: " + url);
+        Log.i(TAG, "Connecting to obstacle detection service: " + url);
+        Log.i(TAG, "User ID for this session: " + (userId != null ? userId : "default"));
 
         try {
             Request request = new Request.Builder()
@@ -127,7 +128,7 @@ public class ObstacleDetectionClient {
         try {
             JSONObject registerMsg = new JSONObject();
             registerMsg.put("type", "register");
-            registerMsg.put("user_id", userId != null ? userId : "default");
+            registerMsg.put("user_id", userId != null ? userId : "android_user_default");
             obstacleWebSocket.send(registerMsg.toString());
             Log.d(TAG, "Sent register message for user: " + userId);
         } catch (JSONException e) {
@@ -163,15 +164,21 @@ public class ObstacleDetectionClient {
      * @param sensorData 当前传感器数据
      */
     public void sendFrame(Bitmap bitmap, SensorCollector.SensorData sensorData) {
-        if (!isConnected || obstacleWebSocket == null) {
+        if (!isConnected) {
+            Log.w(TAG, "sendFrame skipped: not connected (isConnected=" + isConnected + "), ws state: " +
+                    (obstacleWebSocket != null ? "exists" : "null"));
+            return;
+        }
+        if (obstacleWebSocket == null) {
+            Log.w(TAG, "sendFrame skipped: obstacleWebSocket is null (should not happen if isConnected=true)");
             return;
         }
 
         try {
-            // 压缩图像
-            Bitmap resizedBitmap = resizeBitmap(bitmap, 640, 480);
+            // 压缩图像 - 使用稍高的分辨率和质量以获得更好的检测效果
+            Bitmap resizedBitmap = resizeBitmap(bitmap, 800, 600);
             ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
-            resizedBitmap.compress(Bitmap.CompressFormat.JPEG, 90, outputStream);
+            resizedBitmap.compress(Bitmap.CompressFormat.JPEG, 95, outputStream);
 
             byte[] imageBytes = outputStream.toByteArray();
             String base64Image = Base64.encodeToString(imageBytes, Base64.NO_WRAP);
@@ -194,6 +201,9 @@ public class ObstacleDetectionClient {
             }
 
             obstacleWebSocket.send(message.toString());
+            Log.d(TAG, "Frame sent successfully, base64 size: " + base64Image.length() +
+                    " chars, message size: " + message.length() + " chars, sensor_data: " +
+                    (sensorData != null ? "included" : "null"));
 
         } catch (Exception e) {
             Log.e(TAG, "Failed to send frame", e);
@@ -256,10 +266,15 @@ public class ObstacleDetectionClient {
      * 障碍检测WebSocket监听器
      */
     private class ObstacleWebSocketListener extends WebSocketListener {
-        @Override
+            @Override
         public void onOpen(WebSocket webSocket, Response response) {
-            Log.d(TAG, "Obstacle WebSocket connected");
+            Log.d(TAG, "Obstacle WebSocket connected, response: " + response.code());
             isConnected = true;
+
+            // 启动TTS轮询服务（因为避障警告通过Spring Boot TTS队列播报）
+            TtsPollingService ttsPolling = TtsPollingService.getInstance(context);
+            ttsPolling.startPolling();
+            Log.d(TAG, "TTS polling started for obstacle detection");
 
             // 发送注册消息
             register();
@@ -314,7 +329,11 @@ public class ObstacleDetectionClient {
 
         @Override
         public void onFailure(WebSocket webSocket, Throwable t, Response response) {
-            Log.e(TAG, "Obstacle WebSocket failed", t);
+            String errorMsg = "WebSocket failed: " + t.getClass().getSimpleName() + " - " + t.getMessage();
+            if (response != null) {
+                errorMsg += ", response code: " + response.code() + ", message: " + response.message();
+            }
+            Log.e(TAG, "Obstacle WebSocket failed: " + errorMsg, t);
             isConnected = false;
             obstacleWebSocket = null;
 

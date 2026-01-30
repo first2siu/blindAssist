@@ -205,7 +205,11 @@ public class TtsController {
         String source = request.get("source") != null ? (String) request.get("source") : "system";
         String priorityStr = (String) request.get("priority");
 
+        logger.info("[TTS] Enqueue request: userId={}, content={}, priority={}, source={}",
+                    userId, content, priorityStr, source);
+
         if (userId == null || content == null) {
+            logger.warn("[TTS] Invalid enqueue request: userId={}, content={}", userId, content);
             return ResponseEntity.badRequest().body(errorResponse("user_id and content are required"));
         }
 
@@ -214,11 +218,15 @@ public class TtsController {
             try {
                 priority = TtsPriority.valueOf(priorityStr.toUpperCase());
             } catch (IllegalArgumentException e) {
+                logger.warn("[TTS] Invalid priority: {}, using NORMAL", priorityStr);
                 priority = TtsPriority.NORMAL;
             }
         }
 
         ttsQueue.enqueue(userId, content, priority, source);
+
+        logger.info("[TTS] Message enqueued successfully: userId={}, queueSize={}",
+                    userId, ttsQueue.size(userId));
 
         Map<String, Object> response = new HashMap<>();
         response.put("success", true);

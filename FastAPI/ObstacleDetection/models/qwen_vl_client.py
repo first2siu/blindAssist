@@ -13,77 +13,32 @@ class QwenVLClient:
     """
 
     OBSTACLE_DETECTION_PROMPT = """
-你是一个为视障人士服务的障碍物检测助手。请分析用户面前图像中的**行走路径**（盲道、人行道中间区域），识别可能对用户造成危险的障碍物。
+你是盲人导航助手。分析图像中心区域（人行道行走路径），只报告**前方5米内阻挡行走**的障碍物。
 
-## 重要：检测原则
+检测重点：
+1. 台阶/楼梯/路缘石高差
+2. 盲道上的自行车、电动车、摊位
+3. 施工围栏、路障
+4. 明显的坑洼或凸起
 
-**只关注用户行走路径上的障碍物**：
-- 用户正前方的盲道或人行道中央区域（画面中央约60%范围，即10点到2点钟方向）
-- 忽略路两侧的景物（机动车道、远处建筑、路边停放的车辆等）
-- 只报告距离用户10米以内的障碍物
+忽略：
+- 路边停放的车辆（不在路径上）
+- 机动车道上的车
+- 路人、建筑物、树木
 
-## 需要检测的障碍物类型
-
-**高优先级（critical/high）**：
-- 台阶/楼梯（在行走路径上）
-- 盲道占用物（自行车、共享单车、摊位等）
-- 施工围栏/路障（阻挡路径）
-- 凸起的井盖或路面坑洼
-- 正在倒车的车辆（朝向人行道）
-
-**中优先级（medium）**：
-- 低矮悬挂物（可能撞到头部）
-- 路灯/电线杆（在正前方路径上）
-
-**低优先级或不报告（low/ignore）**：
-- 机动车道上的车辆（不在人行道行走路径上）
-- 路边正常停放的车辆
-- 路人（除非阻挡整个路径）
-- 远处的建筑物、标志牌等
-
-## 位置判断标准
-
-| 位置范围 | 时钟方向 | 判断 |
-|---------|---------|------|
-| 正前方 | 11-1点 | 主要检测区域 |
-| 前方偏左/偏右 | 9-11点，1-3点 | 次要检测区域 |
-| 两侧 | 7-9点，3-5点 | 仅高优先级障碍物 |
-| 忽略 | 5-7点（后方） | 不报告 |
-
-## 返回格式（JSON）：
-
-```json
+返回JSON：
 {
-  "obstacles": [
-    {
-      "type": "台阶",
-      "position": "前方",
-      "distance": 3.0,
-      "urgency": "high",
-      "in_path": true,
-      "instruction": "前方三米有台阶，请减速并注意脚下"
-    }
-  ],
+  "obstacles": [{"type": "台阶", "position": "前方", "distance": 2, "urgency": "high", "in_path": true, "instruction": "前方2米有台阶"}],
   "safe": false,
-  "overall_instruction": "前方三米有台阶，请减速并注意脚下"
+  "overall_instruction": "前方2米有台阶，注意脚下"
 }
-```
 
-**字段说明**：
-- `in_path`: 布尔值，表示障碍物是否在用户行走路径上
-- `urgency`: critical（立即停止）/high（警告）/medium（注意）/low（可选播报）
-- `distance`: 估算距离（米），只报告10米以内的
-
-**安全返回**：
-```json
+如无障碍物返回：
 {
   "obstacles": [],
   "safe": true,
   "overall_instruction": "前方路径畅通"
 }
-```
-
-**注意**：如果画面中有多个障碍物，只返回在行走路径上且距离最近的1-2个，避免信息过载。
 """
 
     LAST_TEN_METER_PROMPT = """
@@ -136,18 +91,27 @@ class QwenVLClient:
         messages = self._build_vision_messages(image_base64, self.OBSTACLE_DETECTION_PROMPT)
 
         try:
+            print(f"[VLM] Sending request to model: {self.model_name}")
+            print(f"[VLM] Image base64 length: {len(image_base64)} chars")
+
             response = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=messages,
-                temperature=0.3,
-                max_tokens=500
+                temperature=0.1,  # 降低随机性，提高一致性
+                max_tokens=300
             )
 
             content = response.choices[0].message.content
-            return self._parse_json_response(content)
+            print(f"[VLM] Raw model response: {content[:200]}...")  # 打印前200字符
+
+            result = self._parse_json_response(content)
+            print(f"[VLM] Parsed result: obstacles={len(result.get('obstacles', []))}, safe={result.get('safe', True)}")
+            return result
 
         except Exception as e:
-            print(f"Obstacle detection failed: {e}")
+            print(f"[VLM] Obstacle detection failed: {e}")
+            import traceback
+            traceback.print_exc()
             return self._get_safe_response()
 
     def find_landmark(self, image_base64: str, target_description: str) -> Dict[str, Any]:
@@ -168,8 +132,8 @@ class QwenVLClient:
             response = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=messages,
-                temperature=0.3,
-                max_tokens=500
+                temperature=0.1,  # 降低随机性，提高一致性
+                max_tokens=300
             )
 
             content = response.choices[0].message.content

@@ -15,6 +15,10 @@ public class AgentMessage {
     // 消息类型: "init" (开始任务), "step" (后续步骤), "action" (执行动作), "error", "finish"
     private String type;
 
+    // 用户 ID（用于 TTS 队列识别）
+    @JsonProperty("user_id")
+    private String userId;
+
     // 初始化时的任务文本，例如 "帮我点外卖"
     private String task;
 
@@ -98,6 +102,9 @@ public class AgentMessage {
     // Getters and Setters
     public String getType() { return type; }
     public void setType(String type) { this.type = type; }
+
+    public String getUserId() { return userId; }
+    public void setUserId(String userId) { this.userId = userId; }
 
     public String getTask() { return task; }
     public void setTask(String task) { this.task = task; }

@@ -2,6 +2,8 @@ package com.blindassist.server.service;
 
 import com.blindassist.server.client.NavigationAgentClient;
 import com.blindassist.server.model.SensorData;
+import com.blindassist.server.model.TtsPriority;
+import com.blindassist.server.tts.TtsMessageQueue;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -20,6 +22,10 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * 导航代理服务
  * 连接到 FastAPI 的导航 WebSocket 端点，处理导航请求
+ *
+ * 架构变更：
+ * - 导航指令不再直接通过 WebSocket 返回给 Android
+ * - 而是放入 Redis TTS 优先级队列，由 Android 轮询获取
  */
 @Service
 public class NavigationAgentService {
@@ -35,6 +41,7 @@ public class NavigationAgentService {
     private final Map<String, Long> lastActivityTimestamps = new ConcurrentHashMap<>();
     private final Map<String, WebSocketSession> appSessions = new ConcurrentHashMap<>();
     private final ObjectMapper objectMapper = new ObjectMapper();
+    private final TtsMessageQueue ttsQueue;
 
     // 导航 WebSocket 基础地址 (从配置文件读取，连接到新的 NavigationAgent 服务)
     @Value("${fastapi.websocket-navigation-base-url:ws://10.184.17.161:8081/ws/navigation/}")
@@ -43,6 +50,10 @@ public class NavigationAgentService {
     // 高德地图 API Key (从配置文件读取)
     @Value("${amap.api-key:}")
     private String amapApiKey;
+
+    public NavigationAgentService(TtsMessageQueue ttsQueue) {
+        this.ttsQueue = ttsQueue;
+    }
 
     /**
      * 启动导航任务：建立与 FastAPI 导航服务的连接
@@ -70,7 +81,8 @@ public class NavigationAgentService {
                 long elapsed = System.currentTimeMillis() - startTime;
                 log.info("[NavigationAgentService] 收到导航响应，耗时: {}ms", elapsed);
                 lastActivityTimestamps.put(sessionId, System.currentTimeMillis());  // 更新活动时间
-                sendMessageToApp(appSession, messageFromNav);
+                // 将导航指令添加到 TTS 队列，而不是直接发送给 Android
+                handleNavigationResponse(sessionId, appSession, messageFromNav);
             });
 
             // 3. 建立连接
@@ -209,6 +221,58 @@ public class NavigationAgentService {
             }
         } else {
             log.warn("[NavigationAgentService] 导航客户端不存在或未连接: {}", sessionId);
+        }
+    }
+
+    /**
+     * 处理导航响应
+     * 将导航指令添加到 TTS 队列，而非直接发送给 Android
+     */
+    private void handleNavigationResponse(String sessionId, WebSocketSession appSession, String messageFromNav) {
+        try {
+            Map<String, Object> response = objectMapper.readValue(messageFromNav, Map.class);
+            String status = (String) response.get("status");
+            String type = (String) response.get("type");
+
+            // 处理错误状态
+            if ("error".equals(status)) {
+                String errorMsg = (String) response.get("message");
+                sendErrorToApp(appSession, errorMsg != null ? errorMsg : "导航错误");
+                return;
+            }
+
+            // 处理导航指令 - 添加到 TTS 队列
+            if (response.containsKey("instruction")) {
+                String instruction = (String) response.get("instruction");
+                String userId = sessionUserIds.get(sessionId);
+
+                if (instruction != null && !instruction.isEmpty() && userId != null) {
+                    // 根据类型确定优先级
+                    TtsPriority priority = TtsPriority.NORMAL;
+                    if ("arrived".equals(type)) {
+                        // 到达目的地，使用高优先级
+                        priority = TtsPriority.HIGH;
+                    }
+
+                    ttsQueue.enqueue(userId, instruction, priority, "navigation");
+                    log.info("[NavigationAgentService] 导航指令已加入 TTS 队列: {}", instruction);
+                }
+
+                // 对于到达目的地，额外发送通知给 Android 停止导航
+                if ("arrived".equals(type)) {
+                    String arrivedMsg = "{\"status\":\"success\",\"type\":\"arrived\",\"message\":\"已到达目的地\"}";
+                    sendMessageToApp(appSession, arrivedMsg);
+                }
+            }
+
+            // 处理其他类型的状态消息（如路线规划完成）
+            if ("route_planned".equals(type)) {
+                String statusMsg = "{\"status\":\"success\",\"type\":\"route_planned\",\"message\":\"路线已规划\"}";
+                sendMessageToApp(appSession, statusMsg);
+            }
+
+        } catch (Exception e) {
+            log.error("[NavigationAgentService] 处理导航响应失败", e);
         }
     }
 

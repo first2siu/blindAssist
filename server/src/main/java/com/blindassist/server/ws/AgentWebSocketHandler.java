@@ -158,8 +158,9 @@ public class AgentWebSocketHandler extends TextWebSocketHandler {
             logger.info("处理导航请求: \"{}\"", msg.getTask());
             logger.info("GPS位置: {}", msg.getLocation());
 
-            // 获取用户ID
-            String userId = session.getId();
+            // 获取用户ID：优先使用消息中的 user_id，否则使用 session ID
+            String userId = msg.getUserId() != null ? msg.getUserId() : session.getId();
+            logger.info("用户ID: {}", userId);
 
             // 从消息中获取 GPS 位置
             Map<String, Object> origin;
@@ -337,9 +338,22 @@ public class AgentWebSocketHandler extends TextWebSocketHandler {
 
     @Override
     public void handleTransportError(WebSocketSession session, Throwable exception) throws Exception {
-        logger.error("WebSocket 传输错误", exception);
+        // Connection reset by peer 是客户端正常断开，降低日志级别
+        if (exception.getMessage() != null && exception.getMessage().contains("Connection reset by peer")) {
+            logger.debug("WebSocket 客户端已断开: " + session.getId());
+        } else {
+            logger.error("WebSocket 传输错误", exception);
+        }
         cleanupSession(session.getId());
-        session.close(CloseStatus.SERVER_ERROR);
+        // 只在会话仍然打开时尝试关闭
+        if (session.isOpen()) {
+            try {
+                session.close(CloseStatus.SERVER_ERROR);
+            } catch (Exception e) {
+                // 忽略关闭时的错误，会话可能已经关闭
+                logger.debug("关闭会话时出错（已忽略）: {}", e.getMessage());
+            }
+        }
     }
 
     @Override

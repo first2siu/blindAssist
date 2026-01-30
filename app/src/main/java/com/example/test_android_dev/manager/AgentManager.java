@@ -68,6 +68,8 @@ public class AgentManager {
         this.appContext = context.getApplicationContext();
         wakeLockManager.init(appContext);
         taskStateManager.init(appContext);
+        // 初始化 TTS 轮询服务
+        com.example.test_android_dev.navigation.TtsPollingService.getInstance(appContext);
     }
 
     public void startTask(String taskPrompt, int width, int height) {
@@ -265,6 +267,7 @@ public class AgentManager {
 
         JsonObject json = new JsonObject();
         json.addProperty("type", "init");
+        json.addProperty("user_id", com.example.test_android_dev.Config.USER_ID);
         json.addProperty("task", task);
         json.addProperty("screenshot", base64Image);
         json.addProperty("screen_info", "Android Screen");
@@ -341,28 +344,74 @@ public class AgentManager {
             }
 
             // 处理障碍物检测启动指令（在导航开始时自动启动避障服务）
-            if (response.has("type") && "start_obstacle_detection".equals(response.get("type").getAsString())) {
-                String obstacleUrl = response.has("obstacle_url") ? response.get("obstacle_url").getAsString() : "ws://10.184.17.161:8004/ws";
-                Log.i(TAG, "收到障碍物检测启动指令: " + obstacleUrl);
-                startObstacleDetection(obstacleUrl);
+            if (response.has("type")) {
+                String typeStr = null;
+                try {
+                    typeStr = response.get("type").getAsString();
+                } catch (Exception e) {
+                    Log.e(TAG, "Failed to parse type field", e);
+                }
 
-                String message = response.has("message") ? response.get("message").getAsString() : "避障服务已启动";
-                VoiceManager.getInstance().speakImmediate(message);
-                return;
+                if ("start_obstacle_detection".equals(typeStr)) {
+                    String obstacleUrl = null;
+                    try {
+                        obstacleUrl = response.has("obstacle_url") ? response.get("obstacle_url").getAsString() : "ws://10.184.17.161:8004/ws";
+                    } catch (Exception e) {
+                        obstacleUrl = "ws://10.184.17.161:8004/ws";
+                    }
+                    Log.i(TAG, "收到障碍物检测启动指令: " + obstacleUrl);
+                    startObstacleDetection(obstacleUrl);
+
+                    String message = "避障服务已启动";
+                    try {
+                        if (response.has("message")) {
+                            String msgStr = response.get("message").getAsString();
+                            if (msgStr != null && !msgStr.isEmpty()) {
+                                message = msgStr;
+                            }
+                        }
+                    } catch (Exception e) {
+                        Log.e(TAG, "Failed to parse message field", e);
+                    }
+                    try {
+                        VoiceManager.getInstance().speakImmediate(message);
+                    } catch (Exception e) {
+                        Log.e(TAG, "VoiceManager 播报失败", e);
+                    }
+                    return;
+                }
             }
 
             // 处理导航指令（来自 NavigationAgent 服务）
+            // 注意：导航指令现在通过 TTS 队列到达，这里只处理导航状态
             if (response.has("instruction")) {
-                String instruction = response.get("instruction").getAsString();
-                String type = response.has("type") ? response.get("type").getAsString() : "";
-                Log.i(TAG, "收到导航指令: " + instruction + ", 类型: " + type);
-                VoiceManager.getInstance().speakImmediate(instruction);
+                String type = "";
+                try {
+                    if (response.has("type") && response.get("type") != null && !response.get("type").isJsonNull()) {
+                        type = response.get("type").getAsString();
+                    }
+                } catch (Exception e) {
+                    Log.e(TAG, "Failed to parse type field", e);
+                }
+                Log.i(TAG, "收到导航指令响应，类型: " + type);
 
-                // 首次收到导航指令时，启动位置更新
+                // 首次收到导航指令时，启动位置更新和 TTS 轮询
                 if (!isNavigating) {
                     isNavigating = true;
                     startLocationUpdates();
-                    Log.i(TAG, "导航开始，启动位置更新");
+                    // 启动 TTS 轮询服务
+                    com.example.test_android_dev.navigation.TtsPollingService pollingService =
+                            com.example.test_android_dev.navigation.TtsPollingService.getInstance();
+                    if (pollingService != null) {
+                        pollingService.startPolling();
+                    } else {
+                        Log.e(TAG, "TtsPollingService 未初始化，尝试初始化");
+                        pollingService = com.example.test_android_dev.navigation.TtsPollingService.getInstance(appContext);
+                        if (pollingService != null) {
+                            pollingService.startPolling();
+                        }
+                    }
+                    Log.i(TAG, "导航开始，启动位置更新和 TTS 轮询");
                 }
 
                 // 如果是到达目的地，停止导航
@@ -528,11 +577,21 @@ public class AgentManager {
             return;
         }
 
+        if (appContext == null) {
+            Log.e(TAG, "appContext 为 null，无法启动障碍物检测");
+            return;
+        }
+
         Log.d(TAG, "启动障碍物检测服务: " + wsUrl);
         isObstacleDetectionRunning = true;
 
-        // 启动后台摄像头服务（包含摄像头采集和帧发送）
-        com.example.test_android_dev.service.BackgroundCameraService.start(appContext);
+        try {
+            // 启动后台摄像头服务（包含摄像头采集和帧发送）
+            com.example.test_android_dev.service.BackgroundCameraService.start(appContext);
+        } catch (Exception e) {
+            Log.e(TAG, "启动障碍物检测服务失败", e);
+            isObstacleDetectionRunning = false;
+        }
     }
 
     /**
@@ -562,6 +621,12 @@ public class AgentManager {
         isNavigating = false;
         stopLocationUpdates();
         stopObstacleDetection();
+        // 停止 TTS 轮询服务
+        com.example.test_android_dev.navigation.TtsPollingService pollingService =
+                com.example.test_android_dev.navigation.TtsPollingService.getInstance();
+        if (pollingService != null) {
+            pollingService.stopPolling();
+        }
     }
 
     /**

@@ -38,6 +38,7 @@ public class NavigationManager {
     private WebSocket navigationWebSocket;
 
     private NavigationCallback callback;
+    private TtsPollingService ttsPollingService;
 
     public interface NavigationCallback {
         void onNavigationStarted(String destination);
@@ -99,12 +100,46 @@ public class NavigationManager {
         // 启动传感器收集
         sensorCollector.start();
 
-        // 连接导航WebSocket
-        connectNavigationWebSocket(destination);
+        // 等待 GPS 获取有效位置后再连接 WebSocket
+        waitForValidLocationAndConnect(destination);
+    }
 
-        if (callback != null) {
-            callback.onNavigationStarted(destination);
-        }
+    /**
+     * 等待 GPS 获取有效位置后再连接导航服务
+     */
+    private void waitForValidLocationAndConnect(String destination) {
+        final int MAX_WAIT_TIME_MS = 10000; // 最多等待 10 秒
+        final int CHECK_INTERVAL_MS = 500;  // 每 500ms 检查一次
+
+        new Thread(() -> {
+            int elapsedTime = 0;
+            SensorCollector.SensorData sensorData;
+
+            Log.d(TAG, "等待 GPS 获取有效位置...");
+
+            while (elapsedTime < MAX_WAIT_TIME_MS) {
+                sensorData = sensorCollector.getCurrentData();
+                if (sensorData.isValid()) {
+                    Log.d(TAG, "GPS 位置已获取: " + sensorData);
+                    // 在主线程连接 WebSocket
+                    connectNavigationWebSocket(destination, sensorData);
+                    return;
+                }
+
+                try {
+                    Thread.sleep(CHECK_INTERVAL_MS);
+                } catch (InterruptedException e) {
+                    Log.e(TAG, "GPS 等待被中断", e);
+                    break;
+                }
+                elapsedTime += CHECK_INTERVAL_MS;
+            }
+
+            // 超时：使用当前位置连接（可能是无效位置）
+            Log.w(TAG, "GPS 获取超时，使用当前位置连接");
+            sensorData = sensorCollector.getCurrentData();
+            connectNavigationWebSocket(destination, sensorData);
+        }, "GPS-Wait-Thread").start();
     }
 
     /**
@@ -121,6 +156,12 @@ public class NavigationManager {
         // 停止传感器收集
         sensorCollector.stop();
 
+        // 停止 TTS 轮询
+        if (ttsPollingService != null) {
+            ttsPollingService.stopPolling();
+            Log.d(TAG, "TTS polling stopped");
+        }
+
         // 断开WebSocket
         if (navigationWebSocket != null) {
             navigationWebSocket.close(1000, "User stopped navigation");
@@ -136,8 +177,10 @@ public class NavigationManager {
 
     /**
      * 连接导航WebSocket
+     * @param destination 目的地
+     * @param sensorData 传感器数据（已等待 GPS 获取）
      */
-    private void connectNavigationWebSocket(String destination) {
+    private void connectNavigationWebSocket(String destination, SensorCollector.SensorData sensorData) {
         try {
             String url = NAV_WS_URL + URLEncoder.encode(userId, "UTF-8");
 
@@ -154,7 +197,7 @@ public class NavigationManager {
             // 可选：添加高德API Key
             startMessage.put("amap_api_key", "fed91a0ffe7891336b2398249a2faf53");
 
-            SensorCollector.SensorData sensorData = sensorCollector.getCurrentData();
+            // 使用传入的传感器数据
             if (sensorData.isValid()) {
                 // origin 字段包含经纬度
                 JSONObject originJson = new JSONObject();
@@ -167,7 +210,10 @@ public class NavigationManager {
                 sensorJson.put("heading", sensorData.heading);
                 sensorJson.put("accuracy", sensorData.accuracy);
                 startMessage.put("sensor_data", sensorJson);
+
+                Log.i(TAG, "发送导航请求，位置: lat=" + sensorData.latitude + ", lon=" + sensorData.longitude);
             } else {
+                Log.w(TAG, "GPS 数据无效，使用默认位置 (可能无法正常导航)");
                 // 如果GPS数据无效，使用默认值
                 JSONObject originJson = new JSONObject();
                 originJson.put("lon", 0.0);
@@ -182,6 +228,19 @@ public class NavigationManager {
 
             navigationWebSocket.send(startMessage.toString());
 
+            // 启动 TTS 轮询服务
+            if (ttsPollingService == null) {
+                ttsPollingService = TtsPollingService.getInstance(context);
+            }
+            ttsPollingService.startPolling();
+            Log.d(TAG, "TTS polling started");
+
+            // 通知回调（在主线程）
+            if (callback != null) {
+                android.os.Handler mainHandler = new android.os.Handler(context.getMainLooper());
+                mainHandler.post(() -> callback.onNavigationStarted(destination));
+            }
+
         } catch (Exception e) {
             Log.e(TAG, "Failed to connect navigation WebSocket", e);
             if (callback != null) {
@@ -194,7 +253,13 @@ public class NavigationManager {
      * 发送传感器更新
      */
     private void sendSensorUpdate(SensorCollector.SensorData sensorData) {
-        if (navigationWebSocket == null || !sensorData.isValid()) {
+        if (navigationWebSocket == null) {
+            Log.w(TAG, "sendSensorUpdate skipped: navigationWebSocket is null");
+            return;
+        }
+
+        if (!sensorData.isValid()) {
+            Log.w(TAG, "sendSensorUpdate skipped: sensorData invalid (lat=" + sensorData.latitude + ", lon=" + sensorData.longitude + ")");
             return;
         }
 
@@ -216,6 +281,7 @@ public class NavigationManager {
             message.put("sensor_data", sensorJson);
 
             navigationWebSocket.send(message.toString());
+            Log.d(TAG, "位置更新已发送: lat=" + sensorData.latitude + ", lon=" + sensorData.longitude);
 
         } catch (JSONException e) {
             Log.e(TAG, "Failed to send sensor update", e);
