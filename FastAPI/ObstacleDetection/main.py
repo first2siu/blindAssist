@@ -72,6 +72,14 @@ class DetectionResponse(BaseModel):
     safe: bool
     instruction: str
     obstacles: list = []
+    observation_type: Optional[str] = None
+    delegation_status: Optional[str] = None
+    summary: Optional[str] = None
+    structured_data: Optional[Dict[str, Any]] = None
+    source_tool: Optional[str] = None
+    timestamp: Optional[int] = None
+    client_message: Optional[Dict[str, Any]] = None
+    tts_message: Optional[str] = None
 
 
 @app.get("/health")
@@ -81,6 +89,31 @@ async def health_check():
         "status": "healthy",
         "model": MODEL_NAME,
         "base_url": BASE_URL
+    }
+
+
+@app.get("/tools/metadata")
+async def tools_metadata():
+    """Expose planner-facing tool metadata for this service."""
+    return {
+        "service": "obstacle-detection",
+        "tools": [
+            {
+                "name": "obstacle.detect_single_frame",
+                "transport": "http",
+                "endpoint": "/tools/obstacle/detect",
+            },
+            {
+                "name": "obstacle.find_landmark",
+                "transport": "http",
+                "endpoint": "/tools/obstacle/find_landmark",
+            },
+            {
+                "name": "obstacle.start_stream",
+                "transport": "websocket",
+                "endpoint": "/ws",
+            },
+        ],
     }
 
 
@@ -120,14 +153,29 @@ async def detect_obstacles(request: DetectionRequest):
             request.sensor_data
         )
 
+        instruction = result.get("overall_instruction", "")
         return DetectionResponse(
             safe=result.get("safe", True),
-            instruction=result.get("overall_instruction", ""),
-            obstacles=result.get("obstacles", [])
+            instruction=instruction,
+            obstacles=result.get("obstacles", []),
+            observation_type="obstacle",
+            delegation_status="NEED_GLOBAL_REPLAN",
+            summary=instruction,
+            structured_data=result,
+            source_tool="obstacle.detect_single_frame",
+            timestamp=int(datetime.now().timestamp() * 1000),
+            client_message=None,
+            tts_message=None,
         )
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Detection failed: {str(e)}")
+
+
+@app.post("/tools/obstacle/detect", response_model=DetectionResponse)
+async def tool_detect_obstacles(request: DetectionRequest):
+    """Planner-callable alias for single-frame obstacle detection."""
+    return await detect_obstacles(request)
 
 
 @app.post("/find_landmark")
@@ -149,6 +197,12 @@ async def find_landmark(request: DetectionRequest):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Landmark detection failed: {str(e)}")
+
+
+@app.post("/tools/obstacle/find_landmark")
+async def tool_find_landmark(request: DetectionRequest):
+    """Planner-callable alias for landmark detection."""
+    return await find_landmark(request)
 
 
 @app.websocket("/ws")

@@ -13,18 +13,25 @@ spring.redis.lettuce.pool.max-idle=10
 spring.redis.lettuce.pool.min-idle=5
 
 # FastAPI Service Configuration
-# Replace with your actual vLLM server IP
-fastapi.intent-classifier.base-url=http://YOUR_VLLM_IP:8001/v1
+# Replace with your actual FastAPI service IPs
+fastapi.intent-classifier.base-url=http://YOUR_FASTAPI_IP:8002
 fastapi.intent-classifier.model=Qwen/Qwen2-1.5B-Instruct
 fastapi.intent-classifier.timeout=5000
 
-fastapi.autoglm.base-url=http://YOUR_VLLM_IP:8000/v1
+fastapi.navigation.base-url=http://YOUR_FASTAPI_IP:8081
+fastapi.navigation.model=navigation-agent
+fastapi.navigation.timeout=15000
+
+fastapi.autoglm.base-url=http://YOUR_FASTAPI_IP:8080
 fastapi.autoglm.model=autoglm-phone-9b
 fastapi.autoglm.timeout=30000
 
-fastapi.obstacle.base-url=http://YOUR_VLLM_IP:8003/v1
+fastapi.obstacle.base-url=http://YOUR_FASTAPI_IP:8004
 fastapi.obstacle.model=Qwen/Qwen2-VL-7B-Instruct
 fastapi.obstacle.timeout=15000
+
+fastapi.websocket.base-url=ws://YOUR_FASTAPI_IP:8080/ws/agent/
+fastapi.websocket-navigation-base-url=ws://YOUR_FASTAPI_IP:8081/ws/navigation/
 
 # Amap (高德地图) Configuration
 # Get your API key from: https://console.amap.com/dev/key/app

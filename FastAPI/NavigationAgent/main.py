@@ -1,35 +1,94 @@
-"""
-导航 Agent 服务
+"""Navigation FastAPI service with websocket and planner-tool interfaces."""
 
-使用 qwen2-1.5B-Instruct 模型作为导航 agent，通过 WebSocket 提供导航服务。
-"""
+from __future__ import annotations
 
 import os
-import sys
-import traceback
+import time
 from typing import Dict, Optional
-
-# 将脚本所在目录添加到 sys.path，确保能正确导入同级模块
-_script_dir = os.path.dirname(os.path.abspath(__file__))
-if _script_dir not in sys.path:
-    sys.path.insert(0, _script_dir)
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, ConfigDict, Field
 
 from navigation_agent import NavigationAgent, SensorData
 
 
-# 配置
 MODEL_BASE_URL = os.getenv("MODEL_BASE_URL", "http://localhost:8001/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2-1.5B-Instruct")
 NAVIGATION_PORT = int(os.getenv("NAVIGATION_PORT", 8081))
 
-# 创建 FastAPI 应用
-app = FastAPI(title="Navigation Agent Service")
 
-# 添加 CORS 中间件
+class NavigationToolRequest(BaseModel):
+    """Shared fields for tool-style navigation calls."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    session_id: str = "planner-session"
+    origin: Optional[Dict[str, float]] = None
+    sensor_data: Optional[Dict[str, float]] = Field(default=None, alias="sensor_data")
+
+
+class NavigationStartRequest(NavigationToolRequest):
+    """Start-navigation tool request."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    user_task: str = Field(alias="user_task")
+    amap_api_key: Optional[str] = Field(default=None, alias="amap_api_key")
+
+
+class NavigationCancelRequest(BaseModel):
+    """Cancel-navigation tool request."""
+
+    session_id: str = "planner-session"
+
+
+class NavigationControlRequest(NavigationToolRequest):
+    """Pause/resume request for an existing navigation session."""
+
+
+class ConnectionManager:
+    """Tracks websocket connections and in-memory navigation agents."""
+
+    def __init__(self) -> None:
+        self.active_connections: Dict[str, WebSocket] = {}
+        self.navigation_agents: Dict[str, NavigationAgent] = {}
+
+    async def connect(self, websocket: WebSocket, client_id: str) -> NavigationAgent:
+        if client_id in self.active_connections:
+            old_websocket = self.active_connections[client_id]
+            try:
+                await old_websocket.close()
+            except Exception:
+                pass
+            self.navigation_agents.pop(client_id, None)
+
+        await websocket.accept()
+        self.active_connections[client_id] = websocket
+        return self.get_or_create_agent(client_id)
+
+    def disconnect(self, client_id: str) -> None:
+        self.active_connections.pop(client_id, None)
+        self.navigation_agents.pop(client_id, None)
+
+    def get_or_create_agent(self, client_id: str) -> NavigationAgent:
+        agent = self.navigation_agents.get(client_id)
+        if agent is None:
+            agent = NavigationAgent(
+                model_base_url=MODEL_BASE_URL,
+                model_name=MODEL_NAME,
+            )
+            self.navigation_agents[client_id] = agent
+        return agent
+
+    def remove_agent(self, client_id: str) -> None:
+        self.navigation_agents.pop(client_id, None)
+
+
+manager = ConnectionManager()
+
+app = FastAPI(title="Navigation Agent Service")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -39,199 +98,193 @@ app.add_middleware(
 )
 
 
-# ============================================================
-# 连接管理
-# ============================================================
+def _wrap_navigation_result(result: Dict[str, object], source_tool: str) -> Dict[str, object]:
+    """Attach a normalized observation envelope while preserving legacy fields."""
+    status = str(result.get("status", "success"))
+    result_type = str(result.get("type", "navigation"))
+    instruction = str(result.get("instruction") or result.get("message") or "")
 
-class ConnectionManager:
-    """WebSocket 连接管理器"""
+    if result_type == "arrived":
+        delegation_status = "FINISHED"
+    elif status == "error":
+        delegation_status = "ASK_USER"
+    else:
+        delegation_status = "CONTINUE"
 
-    def __init__(self):
-        self.active_connections: Dict[str, WebSocket] = {}
-        self.navigation_agents: Dict[str, NavigationAgent] = {}
+    client_message: Optional[Dict[str, object]] = None
+    if result_type == "route_planned":
+        client_message = {"status": "success", "type": "route_planned", "message": "Route planned."}
+    elif result_type == "arrived":
+        client_message = {"status": "success", "type": "arrived", "message": "Arrived at destination."}
+    elif result_type == "paused":
+        client_message = {"status": "success", "type": "paused", "message": "Navigation paused."}
+    elif result_type == "resumed":
+        client_message = {"status": "success", "type": "resumed", "message": "Navigation resumed."}
+    elif status == "error":
+        client_message = {"status": "error", "message": instruction or "Navigation failed."}
 
-    async def connect(self, websocket: WebSocket, client_id: str):
-        """接受新连接"""
-        # 检查是否已有相同 client_id 的连接
-        if client_id in self.active_connections:
-            print(f"[{client_id}] 检测到重复连接，关闭旧连接")
-            old_websocket = self.active_connections[client_id]
-            try:
-                await old_websocket.close()
-            except:
-                pass
-            if client_id in self.navigation_agents:
-                del self.navigation_agents[client_id]
+    envelope = {
+        "observation_type": "navigation",
+        "delegation_status": delegation_status,
+        "summary": instruction or result_type,
+        "structured_data": result,
+        "source_tool": source_tool,
+        "timestamp": int(time.time() * 1000),
+        "client_message": client_message,
+        "tts_message": instruction or None,
+    }
+    return {**result, **envelope}
 
-        await websocket.accept()
-        self.active_connections[client_id] = websocket
-
-        # 创建导航 Agent
-        self.navigation_agents[client_id] = NavigationAgent(
-            model_base_url=MODEL_BASE_URL,
-            model_name=MODEL_NAME,
-        )
-
-        print(f"[{client_id}] 导航服务连接成功")
-
-    def disconnect(self, client_id: str):
-        """断开连接"""
-        if client_id in self.active_connections:
-            del self.active_connections[client_id]
-        if client_id in self.navigation_agents:
-            del self.navigation_agents[client_id]
-        print(f"[{client_id}] 导航服务连接断开")
-
-    def get_agent(self, client_id: str) -> Optional[NavigationAgent]:
-        """获取导航 Agent"""
-        return self.navigation_agents.get(client_id)
-
-
-manager = ConnectionManager()
-
-
-# ============================================================
-# HTTP 端点
-# ============================================================
 
 @app.get("/health")
-async def health_check():
-    """健康检查"""
+async def health_check() -> Dict[str, str]:
+    """Health endpoint."""
     return {"status": "healthy", "service": "navigation-agent"}
 
 
-# ============================================================
-# WebSocket 端点
-# ============================================================
+@app.get("/tools/metadata")
+async def tools_metadata() -> Dict[str, object]:
+    """Expose planner-facing tool metadata for this service."""
+    return {
+        "service": "navigation-agent",
+        "tools": [
+            {
+                "name": "navigation.start",
+                "transport": "http",
+                "endpoint": "/tools/navigation/start",
+            },
+            {
+                "name": "navigation.update",
+                "transport": "http",
+                "endpoint": "/tools/navigation/update",
+            },
+            {
+                "name": "navigation.cancel",
+                "transport": "http",
+                "endpoint": "/tools/navigation/cancel",
+            },
+            {
+                "name": "navigation.websocket",
+                "transport": "websocket",
+                "endpoint": "/ws/navigation/{client_id}",
+            },
+        ],
+    }
+
+
+@app.post("/tools/navigation/start")
+async def tool_start_navigation(request: NavigationStartRequest) -> Dict[str, object]:
+    """Planner-callable HTTP wrapper for starting navigation."""
+    agent = manager.get_or_create_agent(request.session_id)
+    if request.amap_api_key:
+        agent.amap_client.api_key = request.amap_api_key
+        agent.amap_client.session.params = {"key": request.amap_api_key}
+
+    result = await agent.initialize_navigation(
+        user_task=request.user_task,
+        origin=request.origin or {"lon": 116.397428, "lat": 39.90923},
+        sensor_data=_build_sensor_data(request.sensor_data),
+    )
+    return _wrap_navigation_result(result, "navigation.start")
+
+
+@app.post("/tools/navigation/update")
+async def tool_update_navigation(request: NavigationToolRequest) -> Dict[str, object]:
+    """Planner-callable HTTP wrapper for updating navigation."""
+    agent = manager.get_or_create_agent(request.session_id)
+    result = await agent.update_location(
+        location=request.origin or {"lon": 116.397428, "lat": 39.90923},
+        sensor_data=_build_sensor_data(request.sensor_data),
+    )
+    return _wrap_navigation_result(result, "navigation.update")
+
+
+@app.post("/tools/navigation/pause")
+async def tool_pause_navigation(request: NavigationControlRequest) -> Dict[str, object]:
+    """Internal HTTP wrapper for pausing navigation."""
+    agent = manager.get_or_create_agent(request.session_id)
+    return _wrap_navigation_result(agent.pause_navigation(), "control.pause")
+
+
+@app.post("/tools/navigation/resume")
+async def tool_resume_navigation(request: NavigationControlRequest) -> Dict[str, object]:
+    """Internal HTTP wrapper for resuming navigation."""
+    agent = manager.get_or_create_agent(request.session_id)
+    result = await agent.resume_navigation(
+        location=request.origin,
+        sensor_data=_build_sensor_data(request.sensor_data),
+    )
+    return _wrap_navigation_result(result, "control.resume")
+
+
+@app.post("/tools/navigation/cancel")
+async def tool_cancel_navigation(request: NavigationCancelRequest) -> Dict[str, object]:
+    """Planner-callable HTTP wrapper for cancelling navigation."""
+    agent = manager.get_or_create_agent(request.session_id)
+    result = agent.cancel_navigation()
+    manager.remove_agent(request.session_id)
+    return _wrap_navigation_result(result, "navigation.cancel")
+
 
 @app.websocket("/ws/navigation/{client_id}")
-async def navigation_websocket_endpoint(websocket: WebSocket, client_id: str):
-    """
-    导航 WebSocket 端点
-
-    支持的消息类型:
-    - init: 初始化导航
-    - location_update: 更新 GPS 位置
-    - cancel: 取消导航
-
-    消息格式:
-    {
-        "type": "init",
-        "user_task": "带我去最近的肯德基",
-        "origin": {"lon": 116.39, "lat": 39.90},
-        "sensor_data": {"heading": 45, "accuracy": 10}
-    }
-    """
-    await manager.connect(websocket, client_id)
-    agent = manager.get_agent(client_id)
+async def navigation_websocket_endpoint(websocket: WebSocket, client_id: str) -> None:
+    """Websocket entrypoint used by the Java server today."""
+    agent = await manager.connect(websocket, client_id)
 
     try:
         while True:
             data = await websocket.receive_json()
             req_type = data.get("type")
 
-            print(f"[{client_id}] 收到消息: type={req_type}")
-
-            # 初始化导航
             if req_type == "init":
-                user_task = data.get("user_task")
-                if not user_task:
-                    await websocket.send_json({
-                        "status": "error",
-                        "message": "Missing user_task"
-                    })
-                    continue
-
-                origin = data.get("origin", {})
-                sensor_data_dict = data.get("sensor_data", {})
-
-                # 设置高德 API Key
-                amap_api_key = data.get("amap_api_key")
-                if amap_api_key:
-                    agent.amap_client.api_key = amap_api_key
-                    agent.amap_client.session.params = {"key": amap_api_key}
-                    print(f"[{client_id}] 高德 API Key 已更新")
-
-                # 构造传感器数据
-                sensor_data = SensorData(
-                    heading=sensor_data_dict.get("heading", 0.0),
-                    accuracy=sensor_data_dict.get("accuracy", 0.0),
-                    pitch=sensor_data_dict.get("pitch", 0.0),
-                    roll=sensor_data_dict.get("roll", 0.0),
+                if data.get("amap_api_key"):
+                    agent.amap_client.api_key = data["amap_api_key"]
+                    agent.amap_client.session.params = {"key": data["amap_api_key"]}
+                result = await agent.initialize_navigation(
+                    user_task=data.get("user_task", ""),
+                    origin=data.get("origin") or {"lon": 116.397428, "lat": 39.90923},
+                    sensor_data=_build_sensor_data(data.get("sensor_data")),
                 )
-
-                print(f"[{client_id}] 导航初始化: {user_task}")
-                print(f"[{client_id}] 位置: {origin}")
-                print(f"[{client_id}] 传感器: heading={sensor_data.heading}")
-
-                try:
-                    result = await agent.initialize_navigation(
-                        user_task=user_task,
-                        origin=origin,
-                        sensor_data=sensor_data,
-                    )
-                    await websocket.send_json(result)
-                    print(f"[{client_id}] 导航初始化成功: {result.get('instruction')}")
-                except Exception as e:
-                    print(f"[{client_id}] 导航初始化失败: {e}")
-                    traceback.print_exc()
-                    await websocket.send_json({
-                        "status": "error",
-                        "message": f"导航初始化失败: {str(e)}"
-                    })
-
-            # 位置更新
-            elif req_type == "location_update":
-                origin = data.get("origin", {})
-                sensor_data_dict = data.get("sensor_data", {})
-
-                sensor_data = SensorData(
-                    heading=sensor_data_dict.get("heading", 0.0),
-                    accuracy=sensor_data_dict.get("accuracy", 0.0),
-                )
-
-                try:
-                    result = await agent.update_location(
-                        location=origin,
-                        sensor_data=sensor_data,
-                    )
-                    await websocket.send_json(result)
-                except Exception as e:
-                    print(f"[{client_id}] 位置更新失败: {e}")
-                    traceback.print_exc()
-
-            # 取消导航
-            elif req_type == "cancel":
-                result = agent.cancel_navigation()
                 await websocket.send_json(result)
+            elif req_type == "location_update":
+                result = await agent.update_location(
+                    location=data.get("origin") or {"lon": 116.397428, "lat": 39.90923},
+                    sensor_data=_build_sensor_data(data.get("sensor_data")),
+                )
+                await websocket.send_json(result)
+            elif req_type == "pause":
+                await websocket.send_json(agent.pause_navigation())
+            elif req_type == "resume":
+                result = await agent.resume_navigation(
+                    location=data.get("origin"),
+                    sensor_data=_build_sensor_data(data.get("sensor_data")),
+                )
+                await websocket.send_json(result)
+            elif req_type == "cancel":
+                await websocket.send_json(agent.cancel_navigation())
                 manager.disconnect(client_id)
                 break
-
             else:
-                await websocket.send_json({
-                    "status": "error",
-                    "message": f"Unknown message type: {req_type}"
-                })
-
+                await websocket.send_json(
+                    {"status": "error", "message": f"Unknown message type: {req_type}"}
+                )
     except WebSocketDisconnect:
         manager.disconnect(client_id)
-    except Exception as e:
-        print(f"[{client_id}] WebSocket 错误: {e}")
-        traceback.print_exc()
+    except Exception as exc:
+        await websocket.send_json({"status": "error", "message": str(exc)})
         manager.disconnect(client_id)
 
 
-# ============================================================
-# 主入口
-# ============================================================
+def _build_sensor_data(raw_sensor_data: Optional[Dict[str, float]]) -> SensorData:
+    """Convert request payloads into SensorData."""
+    raw_sensor_data = raw_sensor_data or {}
+    return SensorData(
+        heading=float(raw_sensor_data.get("heading", 0.0) or 0.0),
+        accuracy=float(raw_sensor_data.get("accuracy", 0.0) or 0.0),
+        pitch=float(raw_sensor_data.get("pitch", 0.0) or 0.0),
+        roll=float(raw_sensor_data.get("roll", 0.0) or 0.0),
+    )
+
 
 if __name__ == "__main__":
-    print("=" * 60)
-    print("  导航 Agent 服务启动")
-    print("=" * 60)
-    print(f"  模型服务: {MODEL_BASE_URL}")
-    print(f"  模型名称: {MODEL_NAME}")
-    print(f"  服务端口: {NAVIGATION_PORT}")
-    print("=" * 60)
-
     uvicorn.run(app, host="0.0.0.0", port=NAVIGATION_PORT)

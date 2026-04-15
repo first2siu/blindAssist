@@ -11,6 +11,7 @@ import org.springframework.context.annotation.Configuration;
 public class FastApiProperties {
 
     private Service intentClassifier;
+    private Service navigation;
     private Service autoglm;
     private Service obstacle;
     private String websocketBaseUrl;
@@ -33,6 +34,9 @@ public class FastApiProperties {
 
     public Service getIntentClassifier() { return intentClassifier; }
     public void setIntentClassifier(Service intentClassifier) { this.intentClassifier = intentClassifier; }
+
+    public Service getNavigation() { return navigation; }
+    public void setNavigation(Service navigation) { this.navigation = navigation; }
 
     public Service getAutoglm() { return autoglm; }
     public void setAutoglm(Service autoglm) { this.autoglm = autoglm; }

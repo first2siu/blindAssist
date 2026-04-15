@@ -1,45 +1,44 @@
-"""Intent classification service using FastAPI."""
+"""BlindAssist planner service built on FastAPI."""
 
-import asyncio
+from __future__ import annotations
+
 import json
-import os
-from typing import Optional
+import time
+import uuid
+from typing import Any, Dict, List, Optional, Tuple
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 
-from openai import OpenAI
+from config import PlannerConfig
+from planner_models import PlannerRequest, PlannerResponse
+from planner_service import BlindAssistPlanner
+from planner_tools import PlannerToolRegistry
 
-# Import prompts
-import sys
-sys.path.append(os.path.join(os.path.dirname(__file__), 'prompts'))
-from intent_prompt import (
-    INTENT_CLASSIFICATION_SYSTEM_PROMPT,
-    INTENT_CLASSIFICATION_USER_PROMPT,
-    NAVIGATION_KEYWORDS,
-    OBSTACLE_KEYWORDS
+
+config = PlannerConfig.from_env()
+tool_registry = PlannerToolRegistry(
+    navigation_base_url=config.navigation_base_url,
+    obstacle_base_url=config.obstacle_base_url,
+    phone_control_base_url=config.phone_control_base_url,
+    timeout_seconds=config.timeout_seconds,
 )
-
-# Configuration
-# 使用 Qwen2-1.5B-Instruct 进行意图分类（轻量级，响应快速）
-MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2-1.5B-Instruct")
-BASE_URL = os.getenv("BASE_URL", "http://localhost:8001/v1")
-API_KEY = os.getenv("API_KEY", "EMPTY")
-
-# Initialize OpenAI client
-client = OpenAI(
-    base_url=BASE_URL,
-    api_key=API_KEY
+planner = BlindAssistPlanner(
+    model_name=config.model_name,
+    base_url=config.base_url,
+    api_key=config.api_key,
+    temperature=config.temperature,
+    max_tokens=config.max_tokens,
+    timeout_seconds=config.timeout_seconds,
+    tool_registry=tool_registry,
 )
 
 app = FastAPI(
-    title="Intent Classification Service",
-    description="Classifies user intent into navigation, phone control, or obstacle detection"
+    title="BlindAssist Planner Service",
+    description="Intent classification, planning, and tool-calling for BlindAssist",
 )
 
-# CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -49,179 +48,117 @@ app.add_middleware(
 )
 
 
-class IntentRequest(BaseModel):
-    """Request model for intent classification."""
-    text: str
-    use_rule: Optional[bool] = True
-
-
-class IntentResponse(BaseModel):
-    """Response model for intent classification."""
-    intent: str
-    reason: str
-    confidence: float
-
-
-def classify_by_rule(text: str) -> Optional[IntentResponse]:
-    """
-    Classify intent using rule-based approach (fast path).
-
-    Returns None if confidence is low and LLM should be used.
-    """
-    text_lower = text.lower()
-
-    # Check for navigation intent
-    for keyword in NAVIGATION_KEYWORDS:
-        if keyword in text_lower:
-            # Exclude phone control operations
-            if any(w in text_lower for w in ["打开", "设置", "应用"]):
-                return IntentResponse(
-                    intent="PHONE_CONTROL",
-                    reason="检测到应用操作关键词",
-                    confidence=0.9
-                )
-            return IntentResponse(
-                intent="NAVIGATION",
-                reason=f"检测到导航关键词: {keyword}",
-                confidence=0.95
-            )
-
-    # Check for obstacle intent
-    for keyword in OBSTACLE_KEYWORDS:
-        if keyword in text_lower:
-            return IntentResponse(
-                intent="OBSTACLE",
-                reason=f"检测到环境感知关键词: {keyword}",
-                confidence=0.9
-            )
-
-    # Low confidence, use LLM
-    return None
-
-
-def classify_by_llm(text: str) -> IntentResponse:
-    """
-    Classify intent using LLM (slow path).
-    """
-    try:
-        response = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {
-                    "role": "system",
-                    "content": INTENT_CLASSIFICATION_SYSTEM_PROMPT
-                },
-                {
-                    "role": "user",
-                    "content": INTENT_CLASSIFICATION_USER_PROMPT.format(user_input=text)
-                }
-            ],
-            temperature=0.1,
-            max_tokens=200,
-            stream=False
-        )
-
-        content = response.choices[0].message.content
-        result = json.loads(content)
-
-        return IntentResponse(
-            intent=result.get("intent", "PHONE_CONTROL"),
-            reason=result.get("reason", ""),
-            confidence=0.85
-        )
-
-    except Exception as e:
-        print(f"LLM classification failed: {e}")
-        # Fallback to phone control
-        return IntentResponse(
-            intent="PHONE_CONTROL",
-            reason="LLM分类失败，使用默认分类",
-            confidence=0.5
-        )
-
-
 @app.get("/health")
-async def health_check():
-    """Health check endpoint."""
+async def health_check() -> Dict[str, Any]:
+    """Health endpoint."""
     return {
         "status": "healthy",
-        "model": MODEL_NAME,
-        "base_url": BASE_URL
+        "service": "blindassist-planner",
+        "model": config.model_name,
+        "base_url": config.base_url,
     }
 
 
-@app.post("/classify", response_model=IntentResponse)
-async def classify_intent(request: IntentRequest):
-    """
-    Classify user intent.
+@app.get("/tools")
+async def list_tools() -> Dict[str, Any]:
+    """List planner-visible tool definitions."""
+    return {"tools": tool_registry.catalog()}
 
-    First uses rule-based classification (fast), then falls back to LLM if needed.
-    """
+
+@app.post("/plan", response_model=PlannerResponse)
+async def plan_task(request: PlannerRequest) -> PlannerResponse:
+    """Return intent, plan, and tool calls for the given request."""
     text = request.text.strip()
-
     if not text:
         raise HTTPException(status_code=400, detail="Text cannot be empty")
+    return await planner.plan(request)
 
-    # Try rule-based classification first
-    if request.use_rule:
-        result = classify_by_rule(text)
-        if result is not None and result.confidence > 0.8:
-            return result
 
-    # Use LLM for classification
-    result = classify_by_llm(text)
-    return result
+@app.post("/classify", response_model=PlannerResponse)
+async def classify_and_plan(request: PlannerRequest) -> PlannerResponse:
+    """Backward-compatible alias for the old intent-classification endpoint."""
+    return await plan_task(request)
 
 
 @app.post("/v1/chat/completions")
-async def chat_completions(request: dict):
-    """
-    OpenAI-compatible endpoint for intent classification.
-    """
-    messages = request.get("messages", [])
-    if not messages:
-        raise HTTPException(status_code=400, detail="Messages required")
-
-    # Get the last user message
-    user_message = ""
-    for msg in reversed(messages):
-        if msg.get("role") == "user":
-            user_message = msg.get("content", "")
-            break
-
-    if not user_message:
+async def chat_completions(request: Dict[str, Any]) -> Dict[str, Any]:
+    """OpenAI-compatible endpoint that exposes planner tool calls."""
+    user_text, screenshot = _extract_last_user_content(request.get("messages", []))
+    if not user_text:
         raise HTTPException(status_code=400, detail="User message not found")
 
-    # Classify intent
-    result = classify_by_llm(user_message)
+    planner_request = PlannerRequest(
+        text=user_text,
+        screenshot=screenshot,
+        execute_tools=False,
+    )
+    plan_result = await planner.plan(planner_request)
 
-    # Format response as OpenAI-compatible
-    response_content = json.dumps({
-        "intent": result.intent,
-        "reason": result.reason
-    }, ensure_ascii=False)
+    wants_tool_calls = bool(request.get("tools")) or request.get("tool_choice") not in (None, "none")
+    assistant_message: Dict[str, Any] = {
+        "role": "assistant",
+        "content": plan_result.response_text or json.dumps(plan_result.model_dump(by_alias=True), ensure_ascii=False),
+    }
 
+    if wants_tool_calls and plan_result.tool_calls:
+        assistant_message["content"] = plan_result.response_text or ""
+        assistant_message["tool_calls"] = [
+            {
+                "id": f"call_{uuid.uuid4().hex[:12]}",
+                "type": "function",
+                "function": {
+                    "name": tool_call.name,
+                    "arguments": json.dumps(tool_call.arguments, ensure_ascii=False),
+                },
+            }
+            for tool_call in plan_result.tool_calls
+        ]
+
+    created = int(time.time())
     return {
-        "id": f"chatcmpl-{asyncio.get_event_loop().time}",
+        "id": f"chatcmpl-{uuid.uuid4().hex}",
         "object": "chat.completion",
-        "created": int(asyncio.get_event_loop().time()),
-        "model": MODEL_NAME,
-        "choices": [{
-            "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": response_content
-            },
-            "finish_reason": "stop"
-        }],
+        "created": created,
+        "model": config.model_name,
+        "choices": [
+            {
+                "index": 0,
+                "message": assistant_message,
+                "finish_reason": "tool_calls" if "tool_calls" in assistant_message else "stop",
+            }
+        ],
         "usage": {
-            "prompt_tokens": len(user_message),
-            "completion_tokens": len(response_content),
-            "total_tokens": len(user_message) + len(response_content)
-        }
+            "prompt_tokens": len(user_text),
+            "completion_tokens": len(json.dumps(assistant_message, ensure_ascii=False)),
+            "total_tokens": len(user_text) + len(json.dumps(assistant_message, ensure_ascii=False)),
+        },
     }
 
 
+def _extract_last_user_content(messages: List[Dict[str, Any]]) -> Tuple[str, Optional[str]]:
+    """Extract the last user text message and optional inline image."""
+    for message in reversed(messages):
+        if message.get("role") != "user":
+            continue
+
+        content = message.get("content")
+        if isinstance(content, str):
+            return content, None
+
+        if isinstance(content, list):
+            text_parts: List[str] = []
+            screenshot: Optional[str] = None
+            for item in content:
+                if item.get("type") == "text":
+                    text_parts.append(item.get("text", ""))
+                elif item.get("type") == "image_url":
+                    url = ((item.get("image_url") or {}).get("url")) or ""
+                    if "base64," in url:
+                        screenshot = url.split("base64,", 1)[1]
+            return "\n".join(part for part in text_parts if part).strip(), screenshot
+
+    return "", None
+
+
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8002))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host=config.host, port=config.port)

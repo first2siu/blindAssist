@@ -19,6 +19,9 @@ public class AgentMessage {
     @JsonProperty("user_id")
     private String userId;
 
+    @JsonProperty("client_session_id")
+    private String clientSessionId;
+
     // 初始化时的任务文本，例如 "帮我点外卖"
     private String task;
 
@@ -105,6 +108,9 @@ public class AgentMessage {
 
     public String getUserId() { return userId; }
     public void setUserId(String userId) { this.userId = userId; }
+
+    public String getClientSessionId() { return clientSessionId; }
+    public void setClientSessionId(String clientSessionId) { this.clientSessionId = clientSessionId; }
 
     public String getTask() { return task; }
     public void setTask(String task) { this.task = task; }
